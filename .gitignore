@@ -1,0 +1,38 @@
+# 민감한 설정 파일들
+config/key.ini
+token_info.json
+
+# Python 캐시 파일들
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 가상환경
+venv/
+env/
+ENV/
+
+# IDE 설정 파일들
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 로그 파일들
+*.log
+logs/
+
+# 임시 파일들
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# 데이터 파일들 (필요시 주석 해제)
+# *.xlsx
+# *.csv
+# data/
+
+# 테스트 출력물
+test_output/ 
