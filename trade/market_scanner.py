@@ -80,6 +80,15 @@ class MarketScanner:
         
         logger.info("MarketScanner 초기화 완료")
     
+    def set_websocket_manager(self, websocket_manager):
+        """웹소켓 매니저 설정
+        
+        Args:
+            websocket_manager: 웹소켓 매니저 인스턴스
+        """
+        self.websocket_manager = websocket_manager
+        logger.info("MarketScanner 웹소켓 매니저 설정 완료")
+    
     def scan_market_pre_open(self) -> List[Tuple[str, float]]:
         """장시작전 시장 전체 스캔
         

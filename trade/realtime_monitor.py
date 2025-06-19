@@ -575,21 +575,21 @@ class RealTimeMonitor:
             self.adjust_monitoring_frequency()
             
             # 시장 열려있지 않으면 대기
-            if not self.is_market_open():
-                if self.market_scan_count % 60 == 0:  # 10분마다 로그
-                    logger.info("시장 마감 - 대기 중...")
-                return
+            # if not self.is_market_open():
+            #     if self.market_scan_count % 60 == 0:  # 10분마다 로그
+            #         logger.info("시장 마감 - 대기 중...")
+            #     return
             
-            # 거래 시간이 아니면 모니터링만
-            if not self.is_trading_time():
-                market_phase = self.get_market_phase()
-                if market_phase == 'lunch':
-                    if self.market_scan_count % 30 == 0:  # 5분마다 로그
-                        logger.info("점심시간 - 모니터링만 실행")
-                elif market_phase == 'closing':
-                    logger.info("장 마감 시간 - 보유 포지션 정리 중...")
-                    self.process_sell_ready_stocks()  # 마감 시간에는 매도만
-                return
+            # # 거래 시간이 아니면 모니터링만
+            # if not self.is_trading_time():
+            #     market_phase = self.get_market_phase()
+            #     if market_phase == 'lunch':
+            #         if self.market_scan_count % 30 == 0:  # 5분마다 로그
+            #             logger.info("점심시간 - 모니터링만 실행")
+            #     elif market_phase == 'closing':
+            #         logger.info("장 마감 시간 - 보유 포지션 정리 중...")
+            #         self.process_sell_ready_stocks()  # 마감 시간에는 매도만
+            #     return
             
             # 성능 로깅 (5분마다)
             if self.market_scan_count % (300 // self.current_monitoring_interval) == 0:
