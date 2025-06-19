@@ -454,7 +454,13 @@ class KISWebSocketManager:
             if self.subscription_manager.is_subscribed(stock_code):
                 if callback:
                     self.subscription_manager.add_stock_callback(stock_code, callback)
+                logger.debug(f"이미 구독됨: {stock_code}")
                 return True
+
+            # 구독 가능 여부 확인
+            if not self.subscription_manager.can_subscribe(stock_code):
+                logger.warning(f"구독 한계 도달: {stock_code}")
+                return False
 
             # 이벤트 루프가 있으면 비동기 방식 사용
             if self._event_loop and not self._event_loop.is_closed():
@@ -463,11 +469,32 @@ class KISWebSocketManager:
                         self.subscribe_stock(stock_code, callback),
                         self._event_loop
                     )
-                    return future.result(timeout=10)
+                    result = future.result(timeout=10)
+                    logger.info(f"✅ 이벤트 루프 구독 성공: {stock_code}")
+                    return result
                 except Exception as e:
                     logger.error(f"이벤트 루프 구독 오류 ({stock_code}): {e}")
-
-            return False
+            
+            # 이벤트 루프가 없으면 새로운 이벤트 루프에서 실행
+            logger.warning(f"이벤트 루프 없음 - 새 루프에서 구독: {stock_code}")
+            try:
+                # 새로운 이벤트 루프 생성 및 실행
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+                try:
+                    result = loop.run_until_complete(self.subscribe_stock(stock_code, callback))
+                    if result:
+                        logger.info(f"✅ 새 루프 구독 성공: {stock_code}")
+                    else:
+                        logger.warning(f"⚠️ 새 루프 구독 실패: {stock_code}")
+                    return result
+                finally:
+                    loop.close()
+                    
+            except Exception as e:
+                logger.error(f"새 루프 구독 오류 ({stock_code}): {e}")
+                return False
 
         except Exception as e:
             logger.error(f"동기 구독 오류 ({stock_code}): {e}")

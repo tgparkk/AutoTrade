@@ -187,7 +187,7 @@ class TradeManager:
                 logger.warning("선정된 종목이 없습니다. 먼저 장시작전 프로세스를 실행하세요.")
                 return False
             
-            # 1. 웹소켓 연결 확인/시작 (필수)
+            # 1. 웹소켓 연결 및 메시지 루프 시작 (필수)
             if not self.websocket_manager.is_connected:
                 logger.info("웹소켓 연결 시작...")
                 if not self.websocket_manager.connect():
@@ -196,17 +196,44 @@ class TradeManager:
                 else:
                     logger.info("✅ 웹소켓 연결 성공")
             
-            # 2. 웹소켓 구독 상태 확인 (select_top_stocks에서 이미 구독됨)
-            if self.websocket_manager.is_connected:
+            # 웹소켓 메시지 루프 시작 (이벤트 루프 설정)
+            if not self.websocket_manager.is_running:
+                logger.info("웹소켓 메시지 루프 시작...")
+                self.websocket_manager.start_message_loop()
+                
+                # 메시지 루프가 시작될 때까지 잠시 대기
+                import time
+                time.sleep(2)
+                
+                if self.websocket_manager.is_running:
+                    logger.info("✅ 웹소켓 메시지 루프 시작 성공")
+                else:
+                    logger.warning("⚠️ 웹소켓 메시지 루프 시작 상태 확인 필요")
+            
+            # 2. 선정된 종목들을 웹소켓에 구독
+            if self.websocket_manager.is_connected and self.websocket_manager.is_running:
+                logger.info(f"선정된 종목 웹소켓 구독 시작: {len(selected_stocks)}개 종목")
+                
+                success_count = 0
+                for position in selected_stocks:
+                    try:
+                        if self.websocket_manager.subscribe_stock_sync(position.stock_code):
+                            success_count += 1
+                            logger.debug(f"✅ 웹소켓 구독 성공: {position.stock_code}")
+                        else:
+                            logger.warning(f"⚠️ 웹소켓 구독 실패: {position.stock_code}")
+                    except Exception as e:
+                        logger.error(f"웹소켓 구독 오류 {position.stock_code}: {e}")
+                
                 subscribed_count = len(self.websocket_manager.get_subscribed_stocks())
-                logger.info(f"웹소켓 구독 확인: {subscribed_count}개 종목 구독됨")
+                logger.info(f"웹소켓 구독 완료: {success_count}/{len(selected_stocks)}개 성공, 총 {subscribed_count}개 구독됨")
                 
                 # 구독된 종목이 너무 적으면 경고
                 if subscribed_count < len(selected_stocks) / 2:
                     logger.warning(f"⚠️ 웹소켓 구독이 부족합니다: {subscribed_count}/{len(selected_stocks)}")
-                    logger.warning("장시작전 프로세스에서 웹소켓 구독이 제대로 이루어지지 않았을 수 있습니다")
+                    logger.warning("실시간 데이터 수신에 제한이 있을 수 있습니다")
             else:
-                logger.error("❌ 웹소켓이 연결되지 않아 실시간 모니터링을 시작할 수 없습니다")
+                logger.error("❌ 웹소켓이 연결되지 않거나 메시지 루프가 실행되지 않아 실시간 모니터링을 시작할 수 없습니다")
                 return False
             
             # 2. StockManager 웹소켓 콜백 설정 
