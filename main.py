@@ -39,9 +39,13 @@ async def main():
         trade_manager = TradeManager()
         logger.info("✅ TradeManager 초기화 완료")
         
-        # 2. 시그널 핸들러 등록
-        signal.signal(signal.SIGINT, trade_manager.signal_handler)
-        signal.signal(signal.SIGTERM, trade_manager.signal_handler)
+        # 2. 시그널 핸들러 등록 (TradeManager의 shutdown_event 사용)
+        def signal_handler(signum, frame):
+            logger.info(f"종료 시그널 수신: {signum}")
+            trade_manager.shutdown_event.set()
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
         
         # 3. 시스템 시작 (모든 비즈니스 로직은 TradeManager에서 처리)
         logger.info("AutoTrade 시스템 시작...")

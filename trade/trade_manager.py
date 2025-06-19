@@ -2,10 +2,8 @@
 전체 자동매매 시스템을 관리하는 TradeManager 클래스
 """
 
-import time
 import threading
 import asyncio
-import signal
 from typing import Dict, List, Optional, TYPE_CHECKING
 from datetime import datetime, time as dt_time
 
@@ -15,9 +13,6 @@ from .stock_manager import StockManager
 from .market_scanner import MarketScanner
 from .realtime_monitor import RealTimeMonitor
 from .trade_executor import TradeExecutor
-# 웹소켓 매니저는 runtime에 import (import 경로 문제 해결)
-from typing import Any
-WebSocketManagerType = Any  # KISWebSocketManager 타입 (필수 컴포넌트)
 from utils.korean_time import now_kst
 from utils.logger import setup_logger
 from utils import get_trading_config_loader
@@ -63,7 +58,6 @@ class TradeManager:
         
         # 시스템 상태
         self.is_running = False
-        self.system_thread = None
         self.shutdown_event = threading.Event()
         
         logger.info("=== TradeManager 초기화 완료 ===")
@@ -142,8 +136,6 @@ class TradeManager:
                     chat_id=telegram_config['chat_id']
                 )
                 
-                # TODO: TradeManager와 TelegramBot 연결 로직 추후 구현
-                
                 logger.info("텔레그램 봇 초기화 준비 완료")
             else:
                 logger.info("텔레그램 봇이 비활성화되어 있습니다")
@@ -178,11 +170,7 @@ class TradeManager:
         logger.info("=== 장시작전 프로세스 시작 ===")
         
         try:
-            # 1. 기존 모니터링 중지 (만약 실행 중이라면)
-            if self.realtime_monitor.is_monitoring:
-                self.realtime_monitor.stop_monitoring()
-            
-            # 2. 시장 스캔 및 종목 선정
+            # 시장 스캔 및 종목 선정
             success = self.market_scanner.run_pre_market_scan()
             
             if not success:
@@ -205,57 +193,6 @@ class TradeManager:
         except Exception as e:
             logger.error(f"장시작전 프로세스 오류: {e}")
             return False
-    
-    def start_market_monitoring(self) -> bool:
-        """장시간 실시간 모니터링 시작
-        
-        Returns:
-            시작 성공 여부
-        """
-        logger.info("=== 장시간 모니터링 시작 ===")
-        
-        try:
-            # 기본 요구사항 확인
-            if not self.websocket_manager:
-                logger.error("❌ 웹소켓 매니저가 초기화되지 않았습니다")
-                return False
-            
-            selected_stocks = self.stock_manager.get_all_selected_stocks()
-            if len(selected_stocks) == 0:
-                logger.warning("선정된 종목이 없습니다. 먼저 장시작전 프로세스를 실행하세요.")
-                return False
-            
-            # 1. 실시간 모니터링 시작
-            logger.info(f"📊 실시간 모니터링 시작: {len(selected_stocks)}개 종목")
-            self.realtime_monitor.start_monitoring()
-            
-            logger.info("✅ 장시간 모니터링이 시작되었습니다")
-            return True
-            
-        except Exception as e:
-            logger.error(f"장시간 모니터링 시작 오류: {e}")
-            return False
-    
-    def stop_market_monitoring(self):
-        """장시간 실시간 모니터링 중지"""
-        logger.info("=== 장시간 모니터링 중지 ===")
-        
-        try:
-            # 1. 실시간 모니터링 중지
-            self.realtime_monitor.stop_monitoring()
-            
-            # 2. 웹소켓 구독 관리
-            if self.websocket_manager and self.websocket_manager.is_connected:
-                subscribed_stocks = self.websocket_manager.get_subscribed_stocks()
-                if subscribed_stocks:
-                    logger.info(f"웹소켓 구독 현황: {len(subscribed_stocks)}개 종목")
-                    # 구독 해제는 다음 스캔 시 새로운 종목으로 자동 교체됨
-                    # 성능상 여기서는 명시적 해제하지 않음
-            
-            logger.info("✅ 장시간 모니터링이 중지되었습니다")
-            
-        except Exception as e:
-            logger.error(f"장시간 모니터링 중지 오류: {e}")
     
     def _generate_daily_report(self):
         """일일 거래 결과 리포트 생성"""
@@ -440,7 +377,7 @@ class TradeManager:
         finally:
             # 정리 작업
             if market_monitoring_active:
-                self.stop_market_monitoring()
+                self.realtime_monitor.is_monitoring = False
             logger.info("📅 메인 루프 종료")
     
     async def _run_initial_test_scan(self):
@@ -478,7 +415,8 @@ class TradeManager:
         
         # 기존 모니터링 중지
         if market_monitoring_active:
-            self.stop_market_monitoring()
+            logger.info("기존 모니터링 중지 중...")
+            self.realtime_monitor.is_monitoring = False
             market_monitoring_active = False
         
         # 시장 스캔 및 종목 선정
@@ -499,18 +437,28 @@ class TradeManager:
             return False
         
         logger.info(f"🚀 장시간 실시간 모니터링 시작 ({len(selected_stocks)}개 종목)")
-        monitor_success = self.start_market_monitoring()
         
-        if monitor_success:
-            return True
-        else:
-            logger.warning("실시간 모니터링 시작 실패")
-            return False
+        # 기존 모니터링이 실행 중이면 중지
+        if self.realtime_monitor.is_monitoring:
+            self.realtime_monitor.stop_monitoring()
+        
+        # 모니터링 상태만 활성화 (별도 스레드 시작하지 않음)
+        self.realtime_monitor.is_monitoring = True
+        
+        # 통계 초기화
+        self.realtime_monitor.market_scan_count = 0
+        self.realtime_monitor.buy_signals_detected = 0
+        self.realtime_monitor.sell_signals_detected = 0
+        self.realtime_monitor.orders_executed = 0
+        self.realtime_monitor.alert_sent.clear()
+        
+        logger.info("✅ 장시간 모니터링 활성화 완료 (메인 루프에서 실행)")
+        return True
     
     async def _handle_market_close(self) -> bool:
         """장마감 후 정리 처리"""
         logger.info("🏁 장마감 - 실시간 모니터링 중지")
-        self.stop_market_monitoring()
+        self.realtime_monitor.is_monitoring = False
         
         # 일일 결과 리포트
         self._generate_daily_report()
@@ -549,21 +497,18 @@ class TradeManager:
             current_time = now_kst()
             logger.info(f"🏥 {current_time.strftime('%H:00')} 시간별 헬스 체크")
             
-            # 1. 시스템 상태 확인
-            system_status = self.get_system_status()
-            
-            # 2. 선정 종목 상태 확인
+            # 선정 종목 상태 확인
             stock_summary = self.stock_manager.get_stock_summary()
             logger.info(f"📊 선정종목: {stock_summary['total_selected']}개")
             
-            # 3. 거래 성과 확인
+            # 거래 성과 확인
             trade_stats = self.trade_executor.get_trade_statistics()
             if trade_stats['total_trades'] > 0:
                 logger.info(f"💰 거래 성과: {trade_stats['total_trades']}건, "
                            f"승률 {trade_stats['win_rate']:.1f}%, "
                            f"손익 {trade_stats['total_pnl']:+,.0f}원")
             
-            # 4. 메모리 사용량 체크 (선택적)
+            # 메모리 사용량 체크 (선택적)
             try:
                 import psutil
                 memory_percent = psutil.virtual_memory().percent
@@ -587,7 +532,7 @@ class TradeManager:
             
             # 1. 실시간 모니터링 중지
             if self.realtime_monitor.is_monitoring:
-                self.stop_market_monitoring()
+                self.realtime_monitor.is_monitoring = False
             
             # 2. 웹소켓 정리 (필수)
             logger.info("웹소켓 매니저 정리 중...")
@@ -611,11 +556,6 @@ class TradeManager:
             
         except Exception as e:
             logger.error(f"시스템 종료 오류: {e}")
-    
-    def signal_handler(self, signum, frame):
-        """시그널 핸들러 (Ctrl+C 등)"""
-        logger.info(f"종료 시그널 수신: {signum}")
-        self.shutdown_event.set()
     
     def get_status(self) -> dict:
         """시스템 상태 반환 (텔레그램 봇에서 호출)"""
