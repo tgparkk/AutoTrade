@@ -71,7 +71,7 @@ class StockManager:
         
         # === 6. 기본 설정 ===
         self.candidate_stocks: List[str] = []
-        self.max_selected_stocks = 15
+        self.max_selected_stocks = 10
         
         logger.info("StockManager 초기화 완료 (하이브리드 방식, 성능 최적화)")
     
@@ -204,6 +204,235 @@ class StockManager:
         except Exception as e:
             logger.error(f"종목 제거 오류 {stock_code}: {e}")
             return False
+    
+    def add_intraday_stock(self, stock_code: str, stock_name: str, 
+                          current_price: float, selection_score: float,
+                          reasons: str = "", market_data: Optional[Dict] = None) -> bool:
+        """장중 추가 종목 등록 (기존 선정 종목과 동일하게 관리)
+        
+        Args:
+            stock_code: 종목코드
+            stock_name: 종목명
+            current_price: 현재가
+            selection_score: 선정 점수
+            reasons: 선정 사유
+            market_data: 추가 시장 데이터 (옵션)
+            
+        Returns:
+            추가 성공 여부
+        """
+        try:
+            # 1. 중복 확인
+            if stock_code in self.reference_stocks:
+                logger.warning(f"이미 관리 중인 종목입니다: {stock_code}[{stock_name}] - 장중 추가 생략")
+                return False
+            
+            # 2. 최대 종목 수 확인 (장중 추가는 더 여유있게 설정)
+            max_total_stocks = self.max_selected_stocks + 10  # 기본 + 장중 추가 여유분
+            if len(self.reference_stocks) >= max_total_stocks:
+                logger.warning(f"최대 관리 종목 수 초과: {len(self.reference_stocks)}/{max_total_stocks} - 장중 추가 제한")
+                return False
+            
+            # 3. 시장 데이터 기본값 설정
+            if not market_data:
+                market_data = {}
+            
+            # 기본 OHLCV 데이터 (현재가 기준으로 추정)
+            open_price = market_data.get('open_price', current_price)
+            high_price = market_data.get('high_price', current_price)
+            low_price = market_data.get('low_price', current_price)
+            volume = market_data.get('volume', 0)
+            
+            # 4. 기본 메타데이터 저장 (장중 추가 표시)
+            with self._ref_lock:
+                self.stock_metadata[stock_code] = {
+                    'stock_code': stock_code,
+                    'stock_name': stock_name,
+                    'created_at': now_kst(),
+                    'max_holding_period': self.strategy_config.get('max_holding_days', 1),
+                    'is_intraday_added': True,  # 🆕 장중 추가 종목 표시
+                    'intraday_reasons': reasons,  # 🆕 추가 사유
+                    'intraday_score': selection_score  # 🆕 추가 당시 점수
+                }
+                
+                # 5. 참조 데이터 생성 (장중 추가용)
+                ref_data = ReferenceData(
+                    pattern_score=selection_score,
+                    yesterday_close=market_data.get('yesterday_close', current_price),
+                    yesterday_volume=market_data.get('yesterday_volume', volume),
+                    yesterday_high=market_data.get('yesterday_high', high_price),
+                    yesterday_low=market_data.get('yesterday_low', low_price),
+                    sma_20=market_data.get('sma_20', current_price),  # 기본값으로 현재가 사용
+                    rsi=market_data.get('rsi', 50.0),
+                    macd=market_data.get('macd', 0.0),
+                    macd_signal=market_data.get('macd_signal', 0.0),
+                    bb_upper=market_data.get('bb_upper', current_price * 1.02),
+                    bb_middle=market_data.get('bb_middle', current_price),
+                    bb_lower=market_data.get('bb_lower', current_price * 0.98),
+                    avg_daily_volume=market_data.get('avg_daily_volume', volume),
+                    avg_trading_value=market_data.get('avg_trading_value', volume * current_price),
+                    market_cap=market_data.get('market_cap', 0),
+                    price_change=market_data.get('price_change', 0),
+                    price_change_rate=market_data.get('price_change_rate', 0)
+                )
+                
+                self.reference_stocks[stock_code] = ref_data
+            
+            # 6. 실시간 데이터 초기화
+            with self._realtime_lock:
+                self.realtime_data[stock_code] = RealtimeData(
+                    current_price=current_price,
+                    today_volume=volume,
+                    today_high=high_price,
+                    today_low=low_price,
+                    # 장중 추가 종목은 현재 시점부터 데이터 수집 시작
+                    contract_strength=market_data.get('contract_strength', 100.0),
+                    buy_ratio=market_data.get('buy_ratio', 50.0),
+                    market_pressure=market_data.get('market_pressure', 'NEUTRAL'),
+                    volume_spike_ratio=market_data.get('volume_spike_ratio', 1.0),
+                    price_change_rate=market_data.get('price_change_rate', 0.0)
+                )
+            
+            # 7. 거래 상태 초기화 (WATCHING 상태로 시작)
+            with self._status_lock:
+                self.trading_status[stock_code] = StockStatus.WATCHING
+                self.trade_info[stock_code] = {
+                    'buy_price': None,
+                    'buy_quantity': None,
+                    'buy_amount': None,
+                    'target_price': None,
+                    'stop_loss_price': None,
+                    'buy_order_id': None,
+                    'buy_order_orgno': None,
+                    'buy_order_time': None,
+                    'sell_order_id': None,
+                    'sell_order_orgno': None,
+                    'sell_order_time_api': None,
+                    'order_time': None,
+                    'execution_time': None,
+                    'sell_order_time': None,
+                    'sell_execution_time': None,
+                    'sell_price': None,
+                    'sell_reason': None,
+                    'unrealized_pnl': None,
+                    'unrealized_pnl_rate': None,
+                    'realized_pnl': None,
+                    'realized_pnl_rate': None,
+                    'position_size_ratio': 0.0,
+                    'detected_time': now_kst(),
+                    'updated_at': now_kst(),
+                    'is_intraday_added': True  # 🆕 장중 추가 표시
+                }
+            
+            # 8. 캐시 무효화
+            self._invalidate_cache(stock_code)
+            
+            logger.info(f"🔥 장중 종목 추가: {stock_code}[{stock_name}] "
+                       f"@{current_price:,}원 (점수:{selection_score:.1f}, 사유:{reasons})")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"장중 종목 추가 오류 {stock_code}: {e}")
+            return False
+    
+    def get_intraday_added_stocks(self) -> List[Stock]:
+        """장중 추가된 종목들만 조회
+        
+        Returns:
+            장중 추가된 종목 리스트
+        """
+        intraday_stocks = []
+        
+        try:
+            with self._ref_lock:
+                intraday_codes = [
+                    code for code, metadata in self.stock_metadata.items()
+                    if metadata.get('is_intraday_added', False)
+                ]
+            
+            for stock_code in intraday_codes:
+                stock = self.get_selected_stock(stock_code)
+                if stock:
+                    intraday_stocks.append(stock)
+            
+            return intraday_stocks
+            
+        except Exception as e:
+            logger.error(f"장중 추가 종목 조회 오류: {e}")
+            return []
+    
+    def remove_intraday_stock(self, stock_code: str, reason: str = "manual_removal") -> bool:
+        """장중 추가 종목 제거 (일반 제거와 동일하지만 로깅 구분)
+        
+        Args:
+            stock_code: 종목코드
+            reason: 제거 사유
+            
+        Returns:
+            제거 성공 여부
+        """
+        try:
+            # 장중 추가 종목인지 확인
+            with self._ref_lock:
+                if stock_code not in self.stock_metadata:
+                    return False
+                
+                metadata = self.stock_metadata[stock_code]
+                is_intraday = metadata.get('is_intraday_added', False)
+                stock_name = metadata.get('stock_name', 'Unknown')
+            
+            # 일반 제거 로직 사용
+            success = self.remove_selected_stock(stock_code)
+            
+            if success and is_intraday:
+                logger.info(f"🗑️ 장중 추가 종목 제거: {stock_code}[{stock_name}] (사유: {reason})")
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"장중 종목 제거 오류 {stock_code}: {e}")
+            return False
+    
+    def get_intraday_summary(self) -> Dict:
+        """장중 추가 종목 요약 정보
+        
+        Returns:
+            장중 추가 종목 통계 딕셔너리
+        """
+        try:
+            intraday_stocks = self.get_intraday_added_stocks()
+            
+            # 상태별 집계
+            status_counts = {}
+            total_score = 0
+            reasons_count = {}
+            
+            for stock in intraday_stocks:
+                # 상태별 집계
+                status = stock.status.value
+                status_counts[status] = status_counts.get(status, 0) + 1
+                
+                # 점수 합계
+                total_score += stock.reference_data.pattern_score
+                
+                # 추가 사유별 집계
+                with self._ref_lock:
+                    metadata = self.stock_metadata.get(stock.stock_code, {})
+                    reasons = metadata.get('intraday_reasons', 'unknown')
+                    reasons_count[reasons] = reasons_count.get(reasons, 0) + 1
+            
+            return {
+                'total_count': len(intraday_stocks),
+                'status_counts': status_counts,
+                'average_score': total_score / len(intraday_stocks) if intraday_stocks else 0,
+                'reasons_distribution': reasons_count,
+                'stock_codes': [stock.stock_code for stock in intraday_stocks]
+            }
+            
+        except Exception as e:
+            logger.error(f"장중 추가 종목 요약 오류: {e}")
+            return {}
     
     # === 빠른 조회 메서드들 (캐시 활용) ===
     
@@ -492,7 +721,7 @@ class StockManager:
         logger.info(f"모든 선정 종목 초기화: {count}개 종목 제거")
     
     def get_stock_summary(self) -> Dict:
-        """종목 관리 요약 정보"""
+        """종목 관리 요약 정보 (장중 추가 종목 포함)"""
         with self._status_lock:
             status_counts = {}
             for status in StockStatus:
@@ -501,12 +730,36 @@ class StockManager:
         
         with self._ref_lock:
             total_selected = len(self.stock_metadata)
+            
+            # 🆕 장중 추가 종목 집계
+            premarket_count = 0
+            intraday_count = 0
+            intraday_reasons = {}
+            
+            for metadata in self.stock_metadata.values():
+                if metadata.get('is_intraday_added', False):
+                    intraday_count += 1
+                    reason = metadata.get('intraday_reasons', 'unknown')
+                    intraday_reasons[reason] = intraday_reasons.get(reason, 0) + 1
+                else:
+                    premarket_count += 1
+        
+        # 🆕 장중 추가 종목 요약 정보
+        intraday_summary = self.get_intraday_summary()
         
         return {
             'total_selected': total_selected,
             'max_capacity': self.max_selected_stocks,
+            'premarket_selected': premarket_count,
+            'intraday_added': intraday_count,
             'status_breakdown': status_counts,
-            'utilization_rate': total_selected / self.max_selected_stocks * 100
+            'utilization_rate': total_selected / self.max_selected_stocks * 100,
+            'intraday_details': {
+                'count': intraday_count,
+                'average_score': intraday_summary.get('average_score', 0),
+                'reasons_distribution': intraday_reasons,
+                'status_breakdown': intraday_summary.get('status_counts', {})
+            }
         }
     
     # === 기존 호환성 메서드들 ===

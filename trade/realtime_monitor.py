@@ -88,7 +88,12 @@ class RealTimeMonitor:
         self.vi_activation_threshold = True       # VI 발동 시 거래 중단 여부
         self.market_pressure_weight = 0.3        # 시장압력 가중치
         
-        logger.info("RealTimeMonitor 초기화 완료 (웹소켓 기반 최적화 버전)")
+        # 🆕 장중 추가 종목 스캔 관련
+        self.last_intraday_scan_time = None
+        self.intraday_scan_interval = 30 * 60  # 30분 간격 (초 단위)
+        self.max_additional_stocks = 10  # 최대 추가 종목 수
+        
+        logger.info("RealTimeMonitor 초기화 완료 (웹소켓 기반 최적화 버전 + 장중추가스캔)")
     
     def is_market_open(self) -> bool:
         """시장 개장 여부 확인
@@ -843,6 +848,9 @@ class RealTimeMonitor:
             # 매도 준비 종목 처리  
             sell_result = self.process_sell_ready_stocks()
             
+            # 🆕 장중 추가 종목 스캔 (30분마다)
+            self._check_and_run_intraday_scan()
+            
             # 🔧 정체된 주문 타임아웃 체크 (30초마다 - 6회마다 실행)
             if self.market_scan_count % (30 // self.current_monitoring_interval) == 0:
                 self._check_stuck_orders()
@@ -918,6 +926,145 @@ class RealTimeMonitor:
         except Exception as e:
             logger.error(f"상태 리포트 로깅 오류: {e}")
     
+    def _check_and_run_intraday_scan(self):
+        """장중 추가 종목 스캔 시간 체크 및 실행"""
+        try:
+            current_time = now_kst()
+            market_phase = self.get_market_phase()
+            
+            # 장중 시간대에만 실행 (점심시간, 마감시간 제외)
+            if market_phase not in ['active']:
+                return
+            
+            # 웹소켓 슬롯 여유 확인 (41개 한도 - 현재 사용량)
+            current_websocket_count = len(self.stock_manager.get_all_positions()) * 2 + 1  # 종목당 2개 + 체결통보 1개
+            available_slots = 41 - current_websocket_count
+            
+            if available_slots < 10:  # 최소 10개 슬롯 여유 필요 (추가 5종목 × 2)
+                logger.debug(f"웹소켓 슬롯 부족으로 장중 스캔 생략 (사용:{current_websocket_count}/41, 여유:{available_slots})")
+                return
+            
+            # 30분 간격 체크
+            should_scan = False
+            if self.last_intraday_scan_time is None:
+                # 첫 실행: 10:00 이후부터 시작
+                if current_time.hour >= 10:
+                    should_scan = True
+            else:
+                # 마지막 스캔으로부터 30분 경과 체크
+                time_elapsed = (current_time - self.last_intraday_scan_time).total_seconds()
+                if time_elapsed >= self.intraday_scan_interval:
+                    should_scan = True
+            
+            if should_scan:
+                logger.info(f"🔍 장중 추가 종목 스캔 실행 (웹소켓 여유:{available_slots}개)")
+                
+                # MarketScanner 인스턴스 생성 및 장중 스캔 실행
+                from trade.market_scanner import MarketScanner
+                market_scanner = MarketScanner(self.stock_manager)
+                
+                additional_stocks = market_scanner.intraday_scan_additional_stocks(
+                    max_stocks=min(self.max_additional_stocks, available_slots // 2)
+                )
+                
+                if additional_stocks:
+                    logger.info(f"🎯 장중 추가 종목 후보 {len(additional_stocks)}개 발견:")
+                    
+                    # 실제 종목 추가 처리
+                    added_count = 0
+                    for i, (stock_code, score, reasons) in enumerate(additional_stocks, 1):
+                        from utils.stock_data_loader import get_stock_data_loader
+                        stock_loader = get_stock_data_loader()
+                        stock_name = stock_loader.get_stock_name(stock_code)
+                        
+                        logger.info(f"  {i}. {stock_code}[{stock_name}] - 점수:{score:.1f} ({reasons})")
+                        
+                        # StockManager에 장중 종목 추가
+                        try:
+                            # 현재가 조회 (KIS API 사용)
+                            from api.kis_market_api import get_inquire_price
+                            price_data = get_inquire_price(div_code="J", itm_no=stock_code)
+                            
+                            if price_data is not None and not price_data.empty:
+                                # 첫 번째 행에서 현재가 정보 추출
+                                row = price_data.iloc[0]
+                                current_price = float(row.get('stck_prpr', 0))  # 현재가
+                                
+                                if current_price > 0:
+                                    # 추가 시장 데이터 준비
+                                    market_data = {
+                                        'volume': int(row.get('acml_vol', 0)),  # 누적거래량
+                                        'high_price': float(row.get('stck_hgpr', current_price)),  # 고가
+                                        'low_price': float(row.get('stck_lwpr', current_price)),   # 저가
+                                        'open_price': float(row.get('stck_oprc', current_price)),  # 시가
+                                        'yesterday_close': float(row.get('stck_sdpr', current_price)),  # 전일종가
+                                        'price_change_rate': float(row.get('prdy_ctrt', 0.0)),  # 전일대비율
+                                        'volume_spike_ratio': 1.0  # 기본값
+                                    }
+                                    
+                                    # 종목명 안전 처리
+                                    safe_stock_name = stock_name if stock_name else f"종목{stock_code}"
+                                    
+                                    # StockManager에 장중 종목 추가
+                                    success = self.stock_manager.add_intraday_stock(
+                                        stock_code=stock_code,
+                                        stock_name=safe_stock_name,
+                                        current_price=current_price,
+                                        selection_score=score,
+                                        reasons=reasons,
+                                        market_data=market_data
+                                    )
+                                    
+                                    if success:
+                                        added_count += 1
+                                        logger.info(f"✅ 장중 종목 추가 성공: {stock_code}[{safe_stock_name}] @{current_price:,}원")
+                                        
+                                        # 🔥 웹소켓 구독 추가 (실시간 모니터링 시작)
+                                        # StockManager가 웹소켓 매니저를 가지고 있는지 확인
+                                        websocket_manager = getattr(self.stock_manager, 'websocket_manager', None)
+                                        if websocket_manager:
+                                            try:
+                                                # 호가 구독
+                                                websocket_manager.subscribe_orderbook(stock_code)
+                                                # 체결가 구독  
+                                                websocket_manager.subscribe_price(stock_code)
+                                                logger.info(f"📡 웹소켓 구독 추가: {stock_code} (호가+체결가)")
+                                            except Exception as ws_e:
+                                                logger.warning(f"웹소켓 구독 실패 {stock_code}: {ws_e}")
+                                        else:
+                                            logger.debug(f"웹소켓 매니저 없음 - 실시간 구독 생략: {stock_code}")
+                                        
+                                    else:
+                                        logger.warning(f"❌ 장중 종목 추가 실패: {stock_code}[{safe_stock_name}]")
+                                
+                                else:
+                                    logger.warning(f"⚠️ 유효하지 않은 현재가로 추가 생략: {stock_code}[{stock_name}] (가격: {current_price})")
+                            
+                            else:
+                                logger.warning(f"⚠️ 현재가 조회 실패로 추가 생략: {stock_code}[{stock_name}]")
+                                
+                        except Exception as add_e:
+                            logger.error(f"장중 종목 추가 처리 오류 {stock_code}: {add_e}")
+                            continue
+                    
+                    # 추가 결과 요약
+                    if added_count > 0:
+                        logger.info(f"🎉 장중 종목 추가 완료: {added_count}/{len(additional_stocks)}개 성공")
+                        
+                        # 장중 추가 종목 요약 출력
+                        intraday_summary = self.stock_manager.get_intraday_summary()
+                        logger.info(f"📊 장중 추가 종목 현황: 총 {intraday_summary.get('total_count', 0)}개, "
+                                   f"평균점수 {intraday_summary.get('average_score', 0):.1f}")
+                    else:
+                        logger.warning("❌ 장중 종목 추가 실패: 모든 후보 종목 추가 불가")
+                else:
+                    logger.info("📊 장중 추가 종목 스캔: 조건 만족 종목 없음")
+                
+                # 마지막 스캔 시간 업데이트
+                self.last_intraday_scan_time = current_time
+                
+        except Exception as e:
+            logger.error(f"장중 추가 종목 스캔 오류: {e}")
     
     def stop_monitoring(self):
         """모니터링 중지"""

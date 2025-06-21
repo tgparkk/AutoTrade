@@ -962,4 +962,138 @@ class MarketScanner:
     
     def __str__(self) -> str:
         """문자열 표현"""
-        return f"MarketScanner(거래량기준: {self.volume_increase_threshold}배, 최소거래량: {self.volume_min_threshold:,}주)" 
+        return f"MarketScanner(거래량기준: {self.volume_increase_threshold}배, 최소거래량: {self.volume_min_threshold:,}주)"
+
+    # ===== 장중 추가 종목 선별 섹션 =====
+    
+    def intraday_scan_additional_stocks(self, max_stocks: int = 5) -> List[Tuple[str, float, str]]:
+        """장중 추가 종목 스캔 (순위분석 API 활용)
+        
+        Args:
+            max_stocks: 최대 선별 종목 수
+            
+        Returns:
+            (종목코드, 점수, 선별사유) 튜플 리스트
+        """
+        logger.info(f"🔍 장중 추가 종목 스캔 시작 (목표: {max_stocks}개)")
+        
+        try:
+            from api.kis_market_api import (
+                get_disparity_rank, get_fluctuation_rank, 
+                get_volume_rank, get_bulk_trans_num_rank
+            )
+            
+            # 기존 선정 종목 제외를 위한 코드 리스트
+            from trade.stock_manager import StockManager
+            excluded_codes = set()
+            # TODO: StockManager에서 현재 관리 중인 종목 코드들 가져오기
+            
+            candidate_stocks = {}  # {종목코드: {'score': 점수, 'reasons': [사유들]}}
+            
+            # 1. 이격도 순위 (과매도 구간) - 가장 중요
+            logger.debug("📊 이격도 순위 조회 (과매도)")
+            disparity_data = get_disparity_rank(
+                fid_input_iscd="0000",  # 전체
+                fid_rank_sort_cls_code="1",  # 이격도 하위순 (과매도)
+                fid_hour_cls_code="20"  # 20일 이격도
+            )
+            
+            if disparity_data is not None and len(disparity_data) > 0:
+                for idx, row in disparity_data.head(10).iterrows():
+                    code = row.get('mksc_shrn_iscd', '')
+                    if code and code not in excluded_codes:
+                        disparity_rate = float(row.get('dspr', 0))
+                        if disparity_rate <= -2.5:  # 과매도 기준
+                            score = min(abs(disparity_rate) * 3, 25)  # 최대 25점
+                            if code not in candidate_stocks:
+                                candidate_stocks[code] = {'score': 0, 'reasons': []}
+                            candidate_stocks[code]['score'] += score
+                            candidate_stocks[code]['reasons'].append(f"이격도과매도({disparity_rate:.1f}%)")
+            
+            # 2. 등락률 순위 (상승 모멘텀) - 두 번째 중요
+            logger.debug("📊 등락률 순위 조회 (상승)")
+            fluctuation_data = get_fluctuation_rank(
+                fid_input_iscd="0000",  # 전체
+                fid_rank_sort_cls_code="0",  # 상승률순
+                fid_rsfl_rate1="1.0",  # 1% 이상
+                fid_rsfl_rate2="15.0"  # 15% 이하 (너무 과열 제외)
+            )
+            
+            if fluctuation_data is not None and len(fluctuation_data) > 0:
+                for idx, row in fluctuation_data.head(15).iterrows():
+                    code = row.get('mksc_shrn_iscd', '')
+                    if code and code not in excluded_codes:
+                        change_rate = float(row.get('prdy_ctrt', 0))
+                        if 1.0 <= change_rate <= 8.0:  # 적정 상승률
+                            score = min(change_rate * 2, 15)  # 최대 15점
+                            if code not in candidate_stocks:
+                                candidate_stocks[code] = {'score': 0, 'reasons': []}
+                            candidate_stocks[code]['score'] += score
+                            candidate_stocks[code]['reasons'].append(f"상승모멘텀({change_rate:.1f}%)")
+            
+            # 3. 거래량 순위 (관심도) - 세 번째
+            logger.debug("📊 거래량 순위 조회")
+            volume_data = get_volume_rank(
+                fid_input_iscd="0000",  # 전체
+                fid_blng_cls_code="1"   # 거래증가율
+            )
+            
+            if volume_data is not None and len(volume_data) > 0:
+                for idx, row in volume_data.head(20).iterrows():
+                    code = row.get('mksc_shrn_iscd', '')
+                    if code and code not in excluded_codes:
+                        volume_ratio = float(row.get('vol_inrt', 0))
+                        if volume_ratio >= 150:  # 150% 이상 거래량 증가
+                            score = min(volume_ratio / 20, 12)  # 최대 12점
+                            if code not in candidate_stocks:
+                                candidate_stocks[code] = {'score': 0, 'reasons': []}
+                            candidate_stocks[code]['score'] += score
+                            candidate_stocks[code]['reasons'].append(f"거래량급증({volume_ratio:.0f}%)")
+            
+            # 4. 체결강도 상위 (매수세) - 네 번째
+            logger.debug("📊 체결강도 순위 조회")
+            strength_data = get_bulk_trans_num_rank(
+                fid_input_iscd="0000",  # 전체
+                fid_rank_sort_cls_code="0"  # 매수상위
+            )
+            
+            if strength_data is not None and len(strength_data) > 0:
+                for idx, row in strength_data.head(15).iterrows():
+                    code = row.get('mksc_shrn_iscd', '')
+                    if code and code not in excluded_codes:
+                        # 체결강도나 매수비율 관련 필드 확인 필요
+                        # 임시로 기본 점수 부여
+                        score = 8
+                        if code not in candidate_stocks:
+                            candidate_stocks[code] = {'score': 0, 'reasons': []}
+                        candidate_stocks[code]['score'] += score
+                        candidate_stocks[code]['reasons'].append("체결강도상위")
+            
+            # 5. 최종 후보 선별 및 점수 계산
+            final_candidates = []
+            
+            for code, data in candidate_stocks.items():
+                total_score = data['score']
+                reasons = ', '.join(data['reasons'])
+                
+                # 최소 점수 기준 (20점 이상)
+                if total_score >= 20:
+                    final_candidates.append((code, total_score, reasons))
+            
+            # 점수순 정렬 및 상위 선별
+            final_candidates.sort(key=lambda x: x[1], reverse=True)
+            selected_stocks = final_candidates[:max_stocks]
+            
+            # 결과 로깅
+            logger.info(f"✅ 장중 추가 종목 스캔 완료: {len(selected_stocks)}개 선별")
+            for i, (code, score, reasons) in enumerate(selected_stocks, 1):
+                from utils.stock_data_loader import get_stock_data_loader
+                stock_loader = get_stock_data_loader()
+                stock_name = stock_loader.get_stock_name(code)
+                logger.info(f"  {i}. {code}[{stock_name}] - 점수:{score:.1f} ({reasons})")
+            
+            return selected_stocks
+            
+        except Exception as e:
+            logger.error(f"❌ 장중 추가 종목 스캔 실패: {e}")
+            return [] 
