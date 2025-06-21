@@ -210,8 +210,8 @@ class StockManager:
     def get_selected_stock(self, stock_code: str) -> Optional[Stock]:
         """선정된 종목 조회 (캐시 활용으로 빠른 조회)"""
         try:
-            # 1. 캐시 확인
-            current_time = time.time()
+            # 1. 캐시 확인 (한국시간 기준)
+            current_time = now_kst().timestamp()
             with self._cache_lock:
                 if (stock_code in self._stock_cache and 
                     stock_code in self._cache_timestamps and
@@ -412,7 +412,7 @@ class StockManager:
                     'buy_quantity': trade_info.get('buy_quantity'),
                     'unrealized_pnl': trade_info.get('unrealized_pnl'),
                     'unrealized_pnl_rate': trade_info.get('unrealized_pnl_rate'),
-                    'snapshot_time': time.time(),
+                    'snapshot_time': now_kst().timestamp(),
                     'last_updated': realtime.last_updated
                 }
                 

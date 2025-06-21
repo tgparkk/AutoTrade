@@ -9,6 +9,7 @@ import websockets
 import requests
 from typing import Optional, Dict, Any
 from utils.logger import setup_logger
+from utils.korean_time import now_kst
 from api import kis_auth as kis
 
 logger = setup_logger(__name__)
@@ -159,7 +160,7 @@ class KISWebSocketConnection:
 
             # KIS PINGPONG은 JSON 메시지이므로 동일한 메시지를 그대로 전송
             await self.websocket.send(ping_data)
-            self.stats['last_pong_time'] = time.time()
+            self.stats['last_pong_time'] = now_kst().timestamp()
             logger.debug(f"🏓 PINGPONG 응답 전송: {ping_data[:80]}...")
             return True
 
@@ -209,7 +210,7 @@ class KISWebSocketConnection:
 
             # 최근 PONG 응답 시간 확인 (60초 이상 없으면 비정상)
             if self.stats.get('last_pong_time'):
-                time_since_pong = time.time() - self.stats['last_pong_time']
+                time_since_pong = now_kst().timestamp() - self.stats['last_pong_time']
                 if time_since_pong > 60:
                     return False
 

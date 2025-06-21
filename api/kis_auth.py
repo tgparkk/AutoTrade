@@ -457,7 +457,7 @@ def _wait_for_api_limit():
     """API 호출 속도 제한을 위한 대기"""
     global _last_api_call_time
 
-    current_time = time.time()
+    current_time = now_kst().timestamp()
 
     if _last_api_call_time is not None:
         elapsed = current_time - _last_api_call_time
@@ -467,7 +467,7 @@ def _wait_for_api_limit():
                 logger.debug(f"API 속도 제한: {wait_time:.3f}초 대기 (이전 호출로부터 {elapsed:.3f}초 경과)")
             time.sleep(wait_time)
 
-    _last_api_call_time = time.time()
+    _last_api_call_time = now_kst().timestamp()
 
 
 def _is_rate_limit_error(response_text: str) -> bool:

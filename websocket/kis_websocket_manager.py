@@ -35,9 +35,9 @@ class KISWebSocketManager:
         self._websocket_thread: Optional[threading.Thread] = None
         self._shutdown_event = threading.Event()
 
-        # 통계
+        # 통계 (한국시간 기준)
         self.stats = {
-            'start_time': time.time(),
+            'start_time': now_kst().timestamp(),
             'total_messages': 0,
             'connection_count': 0,
             'reconnect_count': 0,
@@ -424,7 +424,7 @@ class KISWebSocketManager:
             'message_handler': self.message_handler.get_stats(),
             'data_parser': self.data_parser.get_stats(),
             'total_stats': self.stats.copy(),
-            'uptime': time.time() - self.stats['start_time']
+            'uptime': now_kst().timestamp() - self.stats['start_time']
         }
 
     def get_status_summary(self) -> Dict:

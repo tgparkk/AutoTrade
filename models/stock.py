@@ -109,12 +109,12 @@ class RealtimeData:
     price_change_rate: float = 0.0     # 시가 대비 등락률
     volatility: float = 0.0            # 변동성
     
-    # 업데이트 시간
-    last_updated: float = field(default_factory=time.time)
+    # 업데이트 시간 (한국시간)
+    last_updated: datetime = field(default_factory=now_kst)
     
     def update_timestamp(self):
-        """타임스탬프 업데이트"""
-        self.last_updated = time.time()
+        """타임스탬프 업데이트 (한국시간)"""
+        self.last_updated = now_kst()
     
     def is_market_time(self) -> bool:
         """시장시간 여부 확인"""

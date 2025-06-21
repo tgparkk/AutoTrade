@@ -72,7 +72,7 @@ class TradeExecutor:
         Returns:
             실행 성공 여부
         """
-        start_time = time.time()
+        start_time = now_kst().timestamp()
         
         try:
             # 비상 정지 체크
@@ -137,7 +137,7 @@ class TradeExecutor:
                     return False
                 
                 # 주문 정보 추출
-                actual_order_id = str(order_data.get('ODNO', order_id or f"BUY_{int(time.time())}"))
+                actual_order_id = str(order_data.get('ODNO', order_id or f"BUY_{int(now_kst().timestamp())}"))
                 krx_orgno = str(order_data.get('KRX_FWDG_ORD_ORGNO', ''))
                 ord_tmd = str(order_data.get('ORD_TMD', ''))
                 
@@ -167,7 +167,7 @@ class TradeExecutor:
             stock.target_price = price * (1 + take_profit_rate)
             
             # 실행 시간 기록
-            execution_time = time.time() - start_time
+            execution_time = now_kst().timestamp() - start_time
             self.execution_times.append(execution_time)
             self._update_execution_stats()
             
@@ -438,7 +438,7 @@ class TradeExecutor:
                     return False
                 
                 # 주문 정보 추출
-                actual_order_id = str(order_data.get('ODNO', order_id or f"SELL_{int(time.time())}"))
+                actual_order_id = str(order_data.get('ODNO', order_id or f"SELL_{int(now_kst().timestamp())}"))
                 krx_orgno = str(order_data.get('KRX_FWDG_ORD_ORGNO', ''))
                 ord_tmd = str(order_data.get('ORD_TMD', ''))
                 
