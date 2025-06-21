@@ -55,7 +55,11 @@ class TradingConfigLoader:
             설정값 문자열
         """
         try:
-            return self.config.get(section, key, fallback=default).strip('"')
+            value = self.config.get(section, key, fallback=default)
+            # 주석 제거 (# 문자 이후 제거)
+            if '#' in value:
+                value = value.split('#')[0]
+            return value.strip().strip('"')
         except Exception as e:
             logger.warning(f"설정값 로드 실패 ({section}.{key}): {e}, 기본값 사용: {default}")
             return default
@@ -99,7 +103,8 @@ class TradingConfigLoader:
             'multiple_indicator_confirm': self.get_bool('MULTIPLE_INDICATOR_CONFIRM', section, True),
             'max_holding_days': self.get_int('MAX_HOLDING_DAYS', section, 1),
             'next_day_force_sell': self.get_bool('NEXT_DAY_FORCE_SELL', section, True),
-            'overnight_holding_allowed': self.get_bool('OVERNIGHT_HOLDING_ALLOWED', section, True)
+            'overnight_holding_allowed': self.get_bool('OVERNIGHT_HOLDING_ALLOWED', section, True),
+            'test_mode': self.get_bool('test_mode', section, True)  # 테스트 모드 설정 추가
         }
         
         logger.info("거래 전략 설정 로드 완료")
@@ -117,11 +122,18 @@ class TradingConfigLoader:
             'stop_loss_rate': self.get_float('STOP_LOSS_RATE', section, -0.02),
             'take_profit_rate': self.get_float('TAKE_PROFIT_RATE', section, 0.015),
             'min_position_size': self.get_float('MIN_POSITION_SIZE', section, 0.10),
-            'max_position_size': self.get_float('MAX_POSITION_SIZE', section, 0.20),
-            'max_daily_loss': self.get_float('MAX_DAILY_LOSS', section, -0.05),
+            'max_position_size': self.get_float('MAX_POSITION_SIZE', section, 1000000),
+            'max_daily_loss': self.get_float('MAX_DAILY_LOSS', section, -100000),
             'max_positions': self.get_int('MAX_POSITIONS', section, 5),
             'market_crash_protection': self.get_bool('MARKET_CRASH_PROTECTION', section, True),
-            'market_crash_threshold': self.get_float('MARKET_CRASH_THRESHOLD', section, -0.03)
+            'market_crash_threshold': self.get_float('MARKET_CRASH_THRESHOLD', section, -0.03),
+            # 매수 금액 설정
+            'base_investment_amount': self.get_float('BASE_INVESTMENT_AMOUNT', section, 1000000),
+            'position_size_ratio': self.get_float('POSITION_SIZE_RATIO', section, 0.1),
+            'use_account_ratio': self.get_bool('USE_ACCOUNT_RATIO', section, False),
+            'opening_reduction_ratio': self.get_float('OPENING_REDUCTION_RATIO', section, 0.5),
+            'preclose_reduction_ratio': self.get_float('PRECLOSE_REDUCTION_RATIO', section, 0.3),
+            'conservative_ratio': self.get_float('CONSERVATIVE_RATIO', section, 0.7)
         }
         
         logger.info("리스크 관리 설정 로드 완료")
@@ -236,6 +248,36 @@ class TradingConfigLoader:
         
         logger.info("알림 설정 로드 완료")
         return notification_config
+    
+    def load_performance_config(self) -> Dict:
+        """
+        성능 설정 로드
+        
+        Returns:
+            성능 설정 딕셔너리
+        """
+        section = 'PERFORMANCE'
+        performance_config = {
+            'cache_ttl_seconds': self.get_float('cache_ttl_seconds', section, 2.0),
+            'price_cache_size': self.get_int('price_cache_size', section, 100),
+            'enable_cache_debug': self.get_bool('enable_cache_debug', section, False),
+            'volume_increase_threshold': self.get_float('volume_increase_threshold', section, 2.0),
+            'volume_min_threshold': self.get_int('volume_min_threshold', section, 100000),
+            'pattern_score_threshold': self.get_float('pattern_score_threshold', section, 70.0),
+            'max_holding_days': self.get_int('max_holding_days', section, 1),
+            'contract_strength_threshold': self.get_float('contract_strength_threshold', section, 120.0),
+            'buy_ratio_threshold': self.get_float('buy_ratio_threshold', section, 60.0),
+            'vi_activation_threshold': self.get_bool('vi_activation_threshold', section, True),
+            'market_pressure_weight': self.get_float('market_pressure_weight', section, 0.3),
+            'spread_threshold': self.get_float('spread_threshold', section, 0.01),
+            'weak_contract_strength_threshold': self.get_float('weak_contract_strength_threshold', section, 80.0),
+            'low_buy_ratio_threshold': self.get_float('low_buy_ratio_threshold', section, 30.0),
+            'high_volatility_threshold': self.get_float('high_volatility_threshold', section, 5.0),
+            'price_decline_from_high_threshold': self.get_float('price_decline_from_high_threshold', section, 0.03)
+        }
+        
+        logger.info("성능 설정 로드 완료")
+        return performance_config
     
     def load_all_configs(self) -> Dict:
         """

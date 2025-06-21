@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, TYPE_CHECKING
 from datetime import datetime, time as dt_time
 
 if TYPE_CHECKING:
-    from telegram.telegram_manager import TelegramBot
+    from telegram_bot.telegram_manager import TelegramBot
 from .stock_manager import StockManager
 from .market_scanner import MarketScanner
 from .realtime_monitor import RealTimeMonitor
@@ -21,7 +21,7 @@ logger = setup_logger(__name__)
 
 # 텔레그램 봇 선택적 import
 try:
-    from telegram.telegram_manager import TelegramBot
+    from telegram_bot.telegram_manager import TelegramBot
     TELEGRAM_AVAILABLE = True
 except ImportError as e:
     logger.warning(f"텔레그램 라이브러리를 찾을 수 없습니다: {e}")
@@ -344,7 +344,7 @@ class TradeManager:
         
         # 2. 메인 루프 변수 초기화
         last_scan_date = None
-        market_monitoring_active = False
+        market_monitoring_active = True
         
         try:
             while self.is_running and not self.shutdown_event.is_set():

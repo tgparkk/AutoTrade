@@ -46,6 +46,11 @@ class ReferenceData:
     # 유동성 기준 (불변)
     avg_daily_volume: int = 0       # 평균 일일 거래량
     avg_trading_value: int = 0      # 평균 거래대금
+    
+    # 🆕 추가 기본 정보
+    market_cap: int = 0             # 시가총액
+    price_change: float = 0         # 전일대비 가격 변화
+    price_change_rate: float = 0    # 전일대비 변화율
 
 
 @dataclass
@@ -254,6 +259,9 @@ class Stock:
             'pattern_names': self.reference_data.pattern_names.copy(),
             'avg_daily_volume': self.reference_data.avg_daily_volume,
             'avg_trading_value': self.reference_data.avg_trading_value,
+            'market_cap': self.reference_data.market_cap,
+            'price_change': self.reference_data.price_change,
+            'price_change_rate': self.reference_data.price_change_rate,
         }
         
         # 새로운 값으로 업데이트

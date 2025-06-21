@@ -340,6 +340,7 @@ class RealTimeMonitor:
                          strength_condition and buy_ratio_condition and
                          market_pressure_condition and spread_condition and
                          duplicate_prevention)
+            buy_signal =  True
             
             if buy_signal:
                 self.alert_sent.add(signal_key)
@@ -359,7 +360,7 @@ class RealTimeMonitor:
             return False
     
     def analyze_sell_conditions(self, stock: Stock, realtime_data: Dict) -> Optional[str]:
-        """매도 조건 분석 (공식 문서 기반 고급 지표 활용)
+        """매도 조건 분석 (우선순위 기반 개선 버전)
         
         Args:
             stock: 주식 객체
@@ -372,63 +373,151 @@ class RealTimeMonitor:
             current_price = realtime_data.get('current_price', stock.close_price)
             market_phase = self.get_market_phase()
             
+            # 현재 손익 상황 계산
+            current_pnl = 0
+            current_pnl_rate = 0
+            if stock.buy_price and current_price > 0:
+                current_pnl = (current_price - stock.buy_price) * (stock.buy_quantity or 1)
+                current_pnl_rate = (current_price - stock.buy_price) / stock.buy_price * 100
+            
+            # 보유 시간 계산 (분 단위)
+            holding_minutes = 0
+            if stock.order_time:
+                holding_minutes = (now_kst() - stock.order_time).total_seconds() / 60
+            
             # 🆕 공식 문서 기반 고급 지표 추출
             contract_strength = getattr(stock.realtime_data, 'contract_strength', 100.0)
             buy_ratio = getattr(stock.realtime_data, 'buy_ratio', 50.0)
             market_pressure = getattr(stock.realtime_data, 'market_pressure', 'NEUTRAL')
             trading_halt = getattr(stock.realtime_data, 'trading_halt', False)
+            volatility = getattr(stock.realtime_data, 'volatility', 0.0)
             
-            # 거래정지 시 즉시 매도
+            # === 우선순위 1: 즉시 매도 조건 (리스크 관리) ===
+            
+            # 1-1. 거래정지 시 즉시 매도
             if trading_halt:
                 return "trading_halt"
             
-            # 시장 단계별 매도 조건 조정
-            if market_phase == 'pre_close':
-                # 마감 전에는 보수적으로 매도
-                if stock.buy_price is not None:
-                    unrealized_pnl_rate = (current_price - stock.buy_price) / stock.buy_price * 100
-                    if unrealized_pnl_rate >= 0.5:  # 0.5% 이상 수익시 매도
-                        return "pre_close_profit"
-            elif market_phase == 'closing':
-                # 마감 시간에는 무조건 매도
+            # 1-2. 마감 시간 무조건 매도
+            if market_phase == 'closing':
                 return "market_close"
             
-            # 기본 매도 조건들
+            # 1-3. 급락 감지 (5% 이상 손실 + 고변동성)
+            if current_pnl_rate <= -5.0 and volatility >= 3.0:
+                return "emergency_stop"
+            
+            # === 우선순위 2: 손절 조건 ===
+            
+            # 2-1. 기본 손절 (설정 기반)
             if stock.should_stop_loss(current_price):
                 return "stop_loss"
             
+            # 2-2. 시간 기반 손절 강화 (보유 시간이 길수록 더 엄격)
+            time_based_stop_loss_rate = self._get_time_based_stop_loss_rate(holding_minutes)
+            if current_pnl_rate <= time_based_stop_loss_rate:
+                return "time_based_stop_loss"
+            
+            # === 우선순위 3: 익절 조건 ===
+            
+            # 3-1. 기본 익절
             if stock.should_take_profit(current_price):
                 return "take_profit"
             
+            # 3-2. 시장 단계별 보수적 익절
+            if market_phase == 'pre_close':
+                # 마감 전에는 0.5% 이상 수익시 매도
+                if current_pnl_rate >= 0.5:
+                    return "pre_close_profit"
+            
+            # 3-3. 시간 기반 익절 (장시간 보유시 작은 수익도 확정)
+            if holding_minutes >= 180:  # 3시간 이상 보유
+                if current_pnl_rate >= 0.3:  # 0.3% 이상 수익
+                    return "long_hold_profit"
+            
+            # === 우선순위 4: 기술적 지표 기반 매도 ===
+            
+            # 4-1. 체결강도 급락 (설정 기반 임계값)
+            contract_strength_threshold = self.strategy_config.get('sell_contract_strength_threshold', 80.0)
+            if contract_strength <= contract_strength_threshold:
+                # 손실 상황에서만 적용 (수익 상황에서는 너무 성급한 매도 방지)
+                if current_pnl_rate <= 0:
+                    return "weak_contract_strength"
+            
+            # 4-2. 매수비율 급락 (설정 기반 임계값)
+            buy_ratio_threshold = self.strategy_config.get('sell_buy_ratio_threshold', 30.0)
+            if buy_ratio <= buy_ratio_threshold:
+                # 손실 상황이거나 장시간 보유시에만 적용
+                if current_pnl_rate <= 0 or holding_minutes >= 120:
+                    return "low_buy_ratio"
+            
+            # 4-3. 시장압력 변화
+            if market_pressure == 'SELL':
+                # 손실 상황에서만 적용
+                if current_pnl_rate <= -1.0:
+                    return "market_pressure_sell"
+            
+            # === 우선순위 5: 고변동성 기반 매도 ===
+            
+            # 5-1. 고점 대비 하락 + 고변동성
+            volatility_threshold = self.strategy_config.get('sell_volatility_threshold', 5.0)
+            if volatility >= volatility_threshold:
+                today_high = stock.realtime_data.today_high
+                if today_high > 0:
+                    price_from_high = (today_high - current_price) / today_high * 100
+                    high_drop_threshold = self.strategy_config.get('sell_high_drop_threshold', 3.0)
+                    
+                    if price_from_high >= high_drop_threshold:
+                        return "high_volatility_decline"
+            
+            # === 우선순위 6: 시간 기반 매도 ===
+            
+            # 6-1. 보유기간 초과
             if stock.is_holding_period_exceeded():
                 return "holding_period"
             
-            # 🆕 고급 매도 조건 (공식 문서 기반)
+            # 6-2. 장시간 보유 + 소폭 손실 (기회비용 고려)
+            max_holding_minutes = self.strategy_config.get('max_holding_minutes', 240)  # 4시간
+            if holding_minutes >= max_holding_minutes:
+                if -2.0 <= current_pnl_rate <= 1.0:  # -2%~1% 범위
+                    return "opportunity_cost"
             
-            # 1. 체결강도 급락 매도 (매도 압력 증가)
-            if contract_strength <= 80.0:  # 체결강도 80 이하
-                return "weak_contract_strength"
+            # === 우선순위 7: 적응적 매도 (최근 성과 기반) ===
             
-            # 2. 매수비율 급락 매도 (매도 우세)
-            if buy_ratio <= 30.0:  # 매수비율 30% 이하
-                return "low_buy_ratio"
-            
-            # 3. 시장압력 변화 매도
-            if market_pressure == 'SELL':
-                return "market_pressure_sell"
-            
-            # 4. 급락 감지 매도 (변동성 기반)
-            volatility = stock.realtime_data.volatility
-            if volatility >= 5.0:  # 일중 변동성 5% 이상
-                price_from_high = (stock.realtime_data.today_high - current_price) / stock.realtime_data.today_high
-                if price_from_high >= 0.03:  # 고점 대비 3% 이상 하락
-                    return "high_volatility_decline"
+            # 최근 승률이 낮으면 더 보수적으로 매도
+            recent_win_rate = self.trade_executor._calculate_recent_win_rate(5)
+            if recent_win_rate < 0.3:  # 최근 승률 30% 미만
+                # 보수적 매도: 작은 수익도 확정, 작은 손실도 빠르게 정리
+                if current_pnl_rate >= 0.8:  # 0.8% 수익시 매도
+                    return "conservative_profit"
+                elif current_pnl_rate <= -1.5:  # 1.5% 손실시 매도
+                    return "conservative_stop"
             
             return None
             
         except Exception as e:
             logger.error(f"매도 조건 분석 오류 {stock.stock_code}: {e}")
             return None
+    
+    def _get_time_based_stop_loss_rate(self, holding_minutes: float) -> float:
+        """보유 시간에 따른 동적 손절률 계산
+        
+        Args:
+            holding_minutes: 보유 시간 (분)
+            
+        Returns:
+            손절률 (음수)
+        """
+        base_stop_loss = self.risk_config.get('stop_loss_rate', -0.02)
+        
+        # 보유 시간이 길수록 더 엄격한 손절 적용
+        if holding_minutes <= 30:  # 30분 이내
+            return base_stop_loss  # 기본 손절률
+        elif holding_minutes <= 120:  # 2시간 이내
+            return base_stop_loss * 0.8  # 1.6% 손절
+        elif holding_minutes <= 240:  # 4시간 이내
+            return base_stop_loss * 0.6  # 1.2% 손절
+        else:  # 4시간 초과
+            return base_stop_loss * 0.4  # 0.8% 손절
     
     def process_buy_ready_stocks(self) -> Dict[str, int]:
         """매수 준비 상태 종목들 처리 (웹소켓 기반)
@@ -557,7 +646,7 @@ class RealTimeMonitor:
             return result
     
     def calculate_buy_quantity(self, stock: Stock) -> int:
-        """매수량 계산 (장시간 최적화)
+        """매수량 계산 (설정 기반 개선 버전)
         
         Args:
             stock: 주식 객체
@@ -566,29 +655,77 @@ class RealTimeMonitor:
             매수량
         """
         try:
-            # 시장 단계별 투자 금액 조정
+            # 🔥 설정에서 기본 투자 금액 로드
+            base_amount = self.risk_config.get('base_investment_amount', 1000000)
+            use_account_ratio = self.risk_config.get('use_account_ratio', False)
+            
+            # 계좌 잔고 기반 비율 사용 여부
+            if use_account_ratio:
+                from api.kis_market_api import get_account_balance
+                account_balance = get_account_balance()
+                
+                if account_balance and isinstance(account_balance, dict):
+                    # 총 계좌 자산 = 보유주식 평가액 + 매수가능금액
+                    stock_value = account_balance.get('total_value', 0)  # 보유주식 평가액
+                    available_amount = account_balance.get('available_amount', 0)  # 매수가능금액
+                    total_balance = stock_value + available_amount  # 총 계좌 자산
+                    
+                    if total_balance > 0:
+                        position_ratio = self.risk_config.get('position_size_ratio', 0.1)
+                        base_amount = total_balance * position_ratio
+                        
+                        # 매수가능금액 체크 (안전장치)
+                        if base_amount > available_amount:
+                            logger.warning(f"계산된 투자금액({base_amount:,}원)이 매수가능금액({available_amount:,}원)을 초과 - 매수가능금액으로 제한")
+                            base_amount = available_amount
+                        
+            
+            # 시장 단계별 투자 금액 조정 (설정 기반)
             market_phase = self.get_market_phase()
-            base_amount = 1000000  # 기본 100만원
             
             if market_phase == 'opening':
-                # 장 초반에는 50% 투자
-                investment_amount = base_amount * 0.5
+                # 장 초반 비율 적용
+                reduction_ratio = self.risk_config.get('opening_reduction_ratio', 0.5)
+                investment_amount = base_amount * reduction_ratio
+                logger.debug(f"장 초반 투자금액 조정: {base_amount:,}원 × {reduction_ratio} = {investment_amount:,}원")
             elif market_phase == 'pre_close':
-                # 마감 전에는 30% 투자
-                investment_amount = base_amount * 0.3
+                # 마감 전 비율 적용
+                reduction_ratio = self.risk_config.get('preclose_reduction_ratio', 0.3)
+                investment_amount = base_amount * reduction_ratio
+                logger.debug(f"마감 전 투자금액 조정: {base_amount:,}원 × {reduction_ratio} = {investment_amount:,}원")
             else:
                 # 일반 시간대는 100% 투자
                 investment_amount = base_amount
+                logger.debug(f"일반시간 투자금액: {investment_amount:,}원")
             
-            # 포지션 크기에 따른 추가 조정
+            # 포지션 크기에 따른 추가 조정 (설정 기반)
             current_positions = len(self.stock_manager.get_stocks_by_status(StockStatus.BOUGHT))
             max_positions = self.risk_config.get('max_positions', 5)
             
             if current_positions >= max_positions * 0.8:  # 80% 이상 차면 보수적
-                investment_amount *= 0.7
+                conservative_ratio = self.risk_config.get('conservative_ratio', 0.7)
+                investment_amount *= conservative_ratio
+                logger.debug(f"보수적 조정: × {conservative_ratio} = {investment_amount:,}원 (포지션: {current_positions}/{max_positions})")
             
-            quantity = int(investment_amount / stock.close_price)
-            return max(quantity, 1)  # 최소 1주
+            # 최대 포지션 크기 제한 적용
+            max_position_size = self.risk_config.get('max_position_size', 1000000)
+            if investment_amount > max_position_size:
+                investment_amount = max_position_size
+                logger.debug(f"최대 포지션 크기 제한 적용: {max_position_size:,}원")
+            
+            # 매수량 계산
+            current_price = stock.realtime_data.current_price if stock.realtime_data.current_price > 0 else stock.close_price
+            quantity = int(investment_amount / current_price)
+            
+            # 최소 1주 보장
+            final_quantity = max(quantity, 1)
+            final_amount = final_quantity * current_price
+            
+            logger.info(f"💰 매수량 계산 완료: {stock.stock_code} "
+                       f"{final_quantity}주 @{current_price:,}원 = {final_amount:,}원 "
+                       f"(시장단계: {market_phase}, 기준금액: {base_amount:,}원)")
+            
+            return final_quantity
             
         except Exception as e:
             logger.error(f"매수량 계산 오류 {stock.stock_code}: {e}")
@@ -712,26 +849,6 @@ class RealTimeMonitor:
         except Exception as e:
             logger.error(f"상태 리포트 로깅 오류: {e}")
     
-    def start_monitoring(self):
-        """모니터링 시작 (웹소켓 기반 최적화)"""
-        if self.is_monitoring:
-            logger.warning("이미 모니터링이 실행 중입니다")
-            return
-        
-        self.is_monitoring = True
-        
-        # 통계 초기화
-        self.market_scan_count = 0
-        self.buy_signals_detected = 0
-        self.sell_signals_detected = 0
-        self.orders_executed = 0
-        self.alert_sent.clear()
-        
-        # 모니터링 스레드 시작
-        self.monitor_thread = threading.Thread(target=self._monitoring_loop, daemon=True)
-        self.monitor_thread.start()
-        
-        logger.info("🚀 실시간 모니터링 시작 (웹소켓 기반 최적화 모드)")
     
     def stop_monitoring(self):
         """모니터링 중지"""
@@ -764,36 +881,6 @@ class RealTimeMonitor:
             
         except Exception as e:
             logger.error(f"최종 성능 리포트 오류: {e}")
-    
-    def _monitoring_loop(self):
-        """모니터링 루프 (웹소켓 기반 최적화)"""
-        logger.info("모니터링 루프 시작 (웹소켓 기반)")
-        
-        while self.is_monitoring:
-            try:
-                loop_start_time = time.time()
-                
-                # 모니터링 사이클 실행
-                self.monitor_cycle()
-                
-                # 실행 시간 측정
-                loop_duration = time.time() - loop_start_time
-                
-                # 동적 대기 시간 계산
-                sleep_time = max(0, self.current_monitoring_interval - loop_duration)
-                
-                # 너무 오래 걸리면 경고
-                if loop_duration > self.current_monitoring_interval:
-                    logger.warning(f"모니터링 사이클이 지연됨: {loop_duration:.2f}초 > {self.current_monitoring_interval}초")
-                
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-                    
-            except Exception as e:
-                logger.error(f"모니터링 루프 오류: {e}")
-                time.sleep(self.current_monitoring_interval)
-        
-        logger.info("모니터링 루프 종료")
     
     def get_monitoring_status(self) -> Dict:
         """모니터링 상태 정보 반환 (웹소켓 기반 최적화)"""
@@ -855,4 +942,123 @@ class RealTimeMonitor:
                 f"주기: {self.current_monitoring_interval}초, "
                 f"스캔횟수: {self.market_scan_count}, "
                 f"신호감지: 매수{self.buy_signals_detected}/매도{self.sell_signals_detected}, "
-                f"웹소켓종목: {len(self.stock_manager.realtime_data)}개)") 
+                f"웹소켓종목: {len(self.stock_manager.realtime_data)}개)")
+    
+    def get_sell_condition_analysis(self) -> Dict:
+        """매도 조건 분석 성과 조회
+        
+        Returns:
+            매도 조건별 성과 분석 딕셔너리
+        """
+        try:
+            # TradeExecutor의 최근 거래 기록에서 매도 사유별 성과 분석
+            recent_trades = self.trade_executor.get_recent_trades_summary(20)
+            
+            # 매도 사유별 통계
+            sell_reason_stats = {}
+            total_trades = 0
+            total_pnl = 0
+            
+            for trade in recent_trades['trades']:
+                reason = trade['sell_reason']
+                if reason not in sell_reason_stats:
+                    sell_reason_stats[reason] = {
+                        'count': 0,
+                        'win_count': 0,
+                        'total_pnl': 0.0,
+                        'avg_pnl': 0.0,
+                        'win_rate': 0.0,
+                        'avg_holding_minutes': 0.0
+                    }
+                
+                stats = sell_reason_stats[reason]
+                stats['count'] += 1
+                if trade['is_winning']:
+                    stats['win_count'] += 1
+                stats['total_pnl'] += trade['realized_pnl']
+                stats['avg_holding_minutes'] += trade['holding_minutes']
+                
+                total_trades += 1
+                total_pnl += trade['realized_pnl']
+            
+            # 각 사유별 평균값 계산
+            for reason in sell_reason_stats:
+                stats = sell_reason_stats[reason]
+                if stats['count'] > 0:
+                    stats['win_rate'] = (stats['win_count'] / stats['count']) * 100
+                    stats['avg_pnl'] = stats['total_pnl'] / stats['count']
+                    stats['avg_holding_minutes'] = stats['avg_holding_minutes'] / stats['count']
+            
+            # 매도 조건 효과성 순위
+            effectiveness_ranking = sorted(
+                sell_reason_stats.items(),
+                key=lambda x: (x[1]['win_rate'], x[1]['avg_pnl']),
+                reverse=True
+            )
+            
+            return {
+                'sell_reason_stats': sell_reason_stats,
+                'effectiveness_ranking': effectiveness_ranking,
+                'overall_stats': {
+                    'total_trades': total_trades,
+                    'total_pnl': total_pnl,
+                    'avg_pnl': total_pnl / total_trades if total_trades > 0 else 0.0
+                },
+                'recommendations': self._generate_sell_condition_recommendations(sell_reason_stats)
+            }
+            
+        except Exception as e:
+            logger.error(f"매도 조건 분석 성과 조회 오류: {e}")
+            return {}
+    
+    def _generate_sell_condition_recommendations(self, sell_reason_stats: Dict) -> List[str]:
+        """매도 조건 개선 권장사항 생성
+        
+        Args:
+            sell_reason_stats: 매도 사유별 통계
+            
+        Returns:
+            권장사항 리스트
+        """
+        recommendations = []
+        
+        try:
+            for reason, stats in sell_reason_stats.items():
+                if stats['count'] < 3:  # 샘플이 너무 적으면 건너뛰기
+                    continue
+                
+                # 승률 기반 권장사항
+                if stats['win_rate'] < 30:
+                    recommendations.append(f"❌ '{reason}' 매도 조건의 승률이 낮습니다 ({stats['win_rate']:.1f}%) - 조건 재검토 필요")
+                elif stats['win_rate'] > 70:
+                    recommendations.append(f"✅ '{reason}' 매도 조건이 효과적입니다 ({stats['win_rate']:.1f}%) - 유지 권장")
+                
+                # 평균 손익 기반 권장사항
+                if stats['avg_pnl'] < -10000:
+                    recommendations.append(f"🔻 '{reason}' 매도시 평균 손실이 큽니다 ({stats['avg_pnl']:,.0f}원) - 더 빠른 매도 검토")
+                elif stats['avg_pnl'] > 5000:
+                    recommendations.append(f"🔺 '{reason}' 매도시 평균 수익이 좋습니다 ({stats['avg_pnl']:,.0f}원) - 조건 확대 검토")
+                
+                # 보유 시간 기반 권장사항
+                if stats['avg_holding_minutes'] > 240:  # 4시간 초과
+                    recommendations.append(f"⏰ '{reason}' 매도시 보유 시간이 깁니다 ({stats['avg_holding_minutes']:.0f}분) - 더 빠른 매도 검토")
+            
+            # 전체적인 권장사항
+            if len(sell_reason_stats) > 10:
+                recommendations.append("📊 매도 사유가 너무 많습니다 - 주요 조건으로 단순화 검토")
+            
+            # 특정 조건별 권장사항
+            if 'stop_loss' in sell_reason_stats:
+                stop_loss_stats = sell_reason_stats['stop_loss']
+                if stop_loss_stats['count'] > 5 and stop_loss_stats['win_rate'] < 20:
+                    recommendations.append("🚨 손절 조건이 너무 늦습니다 - 더 빠른 손절 검토")
+            
+            if 'take_profit' in sell_reason_stats:
+                take_profit_stats = sell_reason_stats['take_profit']
+                if take_profit_stats['count'] > 3 and take_profit_stats['avg_pnl'] < 5000:
+                    recommendations.append("💰 익절 수익이 작습니다 - 익절 목표 상향 검토")
+                    
+        except Exception as e:
+            logger.error(f"매도 조건 권장사항 생성 오류: {e}")
+        
+        return recommendations 

@@ -12,7 +12,7 @@
 import time
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime, timedelta
-from collections import defaultdict
+from collections import defaultdict, deque
 from models.stock import Stock, StockStatus
 from utils.korean_time import now_kst
 from utils.logger import setup_logger
@@ -37,6 +37,9 @@ class TradeExecutor:
         self.winning_trades = 0
         self.losing_trades = 0
         self.total_pnl = 0.0
+        
+        # 🆕 최근 거래 기록 저장 (승률 계산용)
+        self.recent_trades = deque(maxlen=50)  # 최근 50건 거래 기록 저장
         
         # 리스크 관리
         self.max_daily_loss = self.risk_config.get('max_daily_loss', -100000)  # 일일 최대 손실
@@ -196,9 +199,19 @@ class TradeExecutor:
             recent_win_rate = self._calculate_recent_win_rate()
             
             if recent_win_rate < 0.3:  # 승률 30% 미만이면 더 보수적
-                return base_rate * 0.7  # 1.4% 손절
+                base_rate = base_rate * 0.7  # 1.4% 손절
             elif recent_win_rate > 0.7:  # 승률 70% 이상이면 더 공격적
-                return base_rate * 1.2  # 2.4% 손절
+                base_rate = base_rate * 1.2  # 2.4% 손절
+        
+        # 🆕 시장 변동성에 따른 추가 조정
+        try:
+            # KOSPI 변동성이 높으면 더 보수적인 손절
+            market_volatility = self._get_market_volatility()
+            if market_volatility > 2.0:  # 2% 이상 변동성
+                base_rate = base_rate * 0.8  # 더 타이트한 손절
+                logger.debug(f"고변동성 시장으로 손절률 조정: {base_rate:.3f}")
+        except Exception as e:
+            logger.debug(f"시장 변동성 조회 실패, 기본값 사용: {e}")
         
         return base_rate
     
@@ -214,11 +227,68 @@ class TradeExecutor:
         current_hour = now_kst().hour
         
         if 9 <= current_hour <= 10:  # 장 초반
-            return base_rate * 1.3  # 2% 익절
+            base_rate = base_rate * 1.3  # 3.9% 익절
         elif 14 <= current_hour <= 15:  # 장 마감 전
-            return base_rate * 0.8  # 1.2% 익절
+            base_rate = base_rate * 0.8  # 2.4% 익절
+        
+        # 🆕 시장 변동성에 따른 추가 조정
+        try:
+            # 변동성이 높으면 더 빠른 익절
+            market_volatility = self._get_market_volatility()
+            if market_volatility > 2.0:  # 2% 이상 변동성
+                base_rate = base_rate * 1.2  # 더 빠른 익절
+                logger.debug(f"고변동성 시장으로 익절률 조정: {base_rate:.3f}")
+            elif market_volatility < 0.5:  # 0.5% 미만 저변동성
+                base_rate = base_rate * 1.1  # 약간 더 기다림
+                logger.debug(f"저변동성 시장으로 익절률 조정: {base_rate:.3f}")
+        except Exception as e:
+            logger.debug(f"시장 변동성 조회 실패, 기본값 사용: {e}")
         
         return base_rate
+    
+    def _get_market_volatility(self) -> float:
+        """시장 변동성 계산 (KOSPI 기준)
+        
+        Returns:
+            시장 변동성 (%)
+        """
+        try:
+            # KOSPI 지수의 일중 변동성 계산
+            from api.kis_market_api import get_inquire_daily_itemchartprice
+            
+            # KOSPI 지수 코드로 일봉 데이터 조회 (최근 5일)
+            kospi_data = get_inquire_daily_itemchartprice(
+                output_dv="2",
+                itm_no="0001",  # KOSPI 지수
+                period_code="D",
+                adj_prc="1"
+            )
+            
+            if kospi_data is None or len(kospi_data) < 5:
+                return 1.0  # 기본값
+            
+            # 최근 5일 변동성 계산
+            volatilities = []
+            for i in range(min(5, len(kospi_data))):
+                row = kospi_data.iloc[i]
+                high = float(row.get('stck_hgpr', 0))
+                low = float(row.get('stck_lwpr', 0))
+                close = float(row.get('stck_clpr', 0))
+                
+                if close > 0:
+                    daily_volatility = (high - low) / close * 100
+                    volatilities.append(daily_volatility)
+            
+            if volatilities:
+                avg_volatility = sum(volatilities) / len(volatilities)
+                logger.debug(f"시장 변동성 계산: {avg_volatility:.2f}% (최근 {len(volatilities)}일)")
+                return avg_volatility
+            
+            return 1.0  # 기본값
+            
+        except Exception as e:
+            logger.debug(f"시장 변동성 계산 오류: {e}")
+            return 1.0  # 기본값
     
     def _calculate_recent_win_rate(self, recent_count: int = 10) -> float:
         """최근 거래의 승률 계산
@@ -227,13 +297,30 @@ class TradeExecutor:
             recent_count: 최근 거래 수
             
         Returns:
-            최근 승률
+            최근 승률 (0.0 ~ 1.0)
         """
-        if self.total_trades < recent_count:
+        if not self.recent_trades:
+            # 거래 기록이 없으면 전체 승률 반환
             return self.winning_trades / max(self.total_trades, 1)
         
-        # TODO: 실제로는 최근 거래 기록을 저장해서 계산해야 함
-        return self.winning_trades / self.total_trades
+        # 최근 거래 기록에서 승률 계산
+        recent_trades_list = list(self.recent_trades)
+        
+        # 요청된 수만큼만 사용 (최신 거래부터)
+        trades_to_analyze = recent_trades_list[-recent_count:] if len(recent_trades_list) >= recent_count else recent_trades_list
+        
+        if not trades_to_analyze:
+            return 0.5  # 기본값
+        
+        # 승리한 거래 수 계산
+        winning_count = sum(1 for trade in trades_to_analyze if trade['is_winning'])
+        
+        recent_win_rate = winning_count / len(trades_to_analyze)
+        
+        logger.debug(f"최근 승률 계산: {winning_count}/{len(trades_to_analyze)} = {recent_win_rate:.3f} "
+                    f"(분석 대상: 최근 {len(trades_to_analyze)}건)")
+        
+        return recent_win_rate
     
     def _update_execution_stats(self):
         """실행 통계 업데이트"""
@@ -414,6 +501,26 @@ class TradeExecutor:
             stock.sell_execution_time = now_kst()
             stock.sell_price = executed_price
             
+            # 🆕 거래 기록 저장 (승률 계산용)
+            is_winning = stock.realized_pnl and stock.realized_pnl > 0
+            trade_record = {
+                'stock_code': stock.stock_code,
+                'stock_name': stock.stock_name,
+                'buy_price': stock.buy_price,
+                'sell_price': executed_price,
+                'quantity': stock.buy_quantity,
+                'realized_pnl': stock.realized_pnl or 0,
+                'realized_pnl_rate': stock.realized_pnl_rate or 0,
+                'is_winning': is_winning,
+                'sell_reason': stock.sell_reason or 'manual',
+                'buy_time': stock.order_time,
+                'sell_time': stock.sell_execution_time,
+                'holding_minutes': (stock.sell_execution_time - stock.order_time).total_seconds() / 60 if stock.order_time else 0,
+                'timestamp': now_kst()
+            }
+            
+            self.recent_trades.append(trade_record)
+            
             # 통계 업데이트
             self.total_trades += 1
             self.total_pnl += stock.realized_pnl or 0
@@ -436,7 +543,8 @@ class TradeExecutor:
             
             logger.info(f"✅ 매도 체결 확인: {stock.stock_code} "
                        f"손익: {stock.realized_pnl:+,.0f}원 ({stock.realized_pnl_rate:+.2f}%) "
-                       f"사유: {stock.sell_reason}")
+                       f"사유: {stock.sell_reason} "
+                       f"보유시간: {trade_record['holding_minutes']:.1f}분")
             
             return True
             
@@ -539,25 +647,136 @@ class TradeExecutor:
             거래 통계 딕셔너리
         """
         win_rate = (self.winning_trades / max(self.total_trades, 1)) * 100
+        recent_win_rate = self._calculate_recent_win_rate() * 100  # 최근 10건 승률
+        recent_win_rate_5 = self._calculate_recent_win_rate(5) * 100  # 최근 5건 승률
         
         return {
             'total_trades': self.total_trades,
             'winning_trades': self.winning_trades,
             'losing_trades': self.losing_trades,
             'win_rate': win_rate,
+            'recent_win_rate_10': recent_win_rate,  # 최근 10건 승률
+            'recent_win_rate_5': recent_win_rate_5,   # 최근 5건 승률
             'total_pnl': self.total_pnl,
             'total_realized_pnl': self.total_pnl,  # 호환성
             'avg_execution_time': self.avg_execution_time,
             'daily_trade_count': self.daily_trade_count,
-            'emergency_stop': self.emergency_stop
+            'emergency_stop': self.emergency_stop,
+            'recent_trades_count': len(self.recent_trades)  # 저장된 거래 기록 수
         }
     
-    def reset_statistics(self):
-        """통계 초기화 (일일 리셋)"""
-        logger.info("거래 통계 초기화")
+    def get_recent_trades_summary(self, count: int = 10) -> Dict:
+        """최근 거래 요약 정보 조회
+        
+        Args:
+            count: 조회할 최근 거래 수
+            
+        Returns:
+            최근 거래 요약 딕셔너리
+        """
+        if not self.recent_trades:
+            return {
+                'trades': [],
+                'summary': {
+                    'count': 0,
+                    'win_count': 0,
+                    'lose_count': 0,
+                    'win_rate': 0.0,
+                    'total_pnl': 0.0,
+                    'avg_pnl': 0.0,
+                    'avg_holding_minutes': 0.0
+                }
+            }
+        
+        # 최근 거래 추출
+        recent_trades_list = list(self.recent_trades)
+        trades_to_show = recent_trades_list[-count:] if len(recent_trades_list) >= count else recent_trades_list
+        
+        # 요약 통계 계산
+        win_count = sum(1 for trade in trades_to_show if trade['is_winning'])
+        lose_count = len(trades_to_show) - win_count
+        win_rate = (win_count / len(trades_to_show)) * 100 if trades_to_show else 0.0
+        total_pnl = sum(trade['realized_pnl'] for trade in trades_to_show)
+        avg_pnl = total_pnl / len(trades_to_show) if trades_to_show else 0.0
+        avg_holding_minutes = sum(trade['holding_minutes'] for trade in trades_to_show) / len(trades_to_show) if trades_to_show else 0.0
+        
+        return {
+            'trades': trades_to_show,
+            'summary': {
+                'count': len(trades_to_show),
+                'win_count': win_count,
+                'lose_count': lose_count,
+                'win_rate': win_rate,
+                'total_pnl': total_pnl,
+                'avg_pnl': avg_pnl,
+                'avg_holding_minutes': avg_holding_minutes
+            }
+        }
+    
+    def get_performance_analysis(self) -> Dict:
+        """성과 분석 정보 조회
+        
+        Returns:
+            성과 분석 딕셔너리
+        """
+        recent_summary = self.get_recent_trades_summary(20)
+        
+        # 승률 추세 분석
+        recent_5_win_rate = self._calculate_recent_win_rate(5) * 100
+        recent_10_win_rate = self._calculate_recent_win_rate(10) * 100
+        recent_20_win_rate = self._calculate_recent_win_rate(20) * 100
+        
+        # 매도 사유별 통계
+        sell_reason_stats = {}
+        if self.recent_trades:
+            for trade in self.recent_trades:
+                reason = trade['sell_reason']
+                if reason not in sell_reason_stats:
+                    sell_reason_stats[reason] = {'count': 0, 'win_count': 0, 'total_pnl': 0.0}
+                
+                sell_reason_stats[reason]['count'] += 1
+                if trade['is_winning']:
+                    sell_reason_stats[reason]['win_count'] += 1
+                sell_reason_stats[reason]['total_pnl'] += trade['realized_pnl']
+        
+        # 각 사유별 승률 계산
+        for reason in sell_reason_stats:
+            stats = sell_reason_stats[reason]
+            stats['win_rate'] = (stats['win_count'] / stats['count']) * 100 if stats['count'] > 0 else 0.0
+            stats['avg_pnl'] = stats['total_pnl'] / stats['count'] if stats['count'] > 0 else 0.0
+        
+        return {
+            'recent_summary': recent_summary['summary'],
+            'win_rate_trend': {
+                'recent_5': recent_5_win_rate,
+                'recent_10': recent_10_win_rate,
+                'recent_20': recent_20_win_rate,
+                'overall': (self.winning_trades / max(self.total_trades, 1)) * 100
+            },
+            'sell_reason_analysis': sell_reason_stats,
+            'risk_metrics': {
+                'emergency_stop': self.emergency_stop,
+                'daily_trades': self.daily_trade_count,
+                'max_daily_loss': self.max_daily_loss,
+                'current_pnl': self.total_pnl
+            }
+        }
+    
+    def reset_statistics(self, reset_trade_history: bool = False):
+        """통계 초기화 (일일 리셋)
+        
+        Args:
+            reset_trade_history: 거래 기록도 함께 초기화할지 여부
+        """
+        logger.info(f"거래 통계 초기화 (거래기록 초기화: {reset_trade_history})")
         self.daily_trade_count = 0
         self.emergency_stop = False
         self.hourly_trades.clear()
+        
+        # 거래 기록 초기화 (선택적)
+        if reset_trade_history:
+            self.recent_trades.clear()
+            logger.info("거래 기록도 함께 초기화됨")
         
         # 전체 통계는 유지 (누적)
         # self.total_trades = 0
@@ -572,9 +791,19 @@ class TradeExecutor:
             성과 요약 문자열
         """
         stats = self.get_trade_statistics()
-        return (f"거래 성과: {stats['total_trades']}건 "
-                f"(승률 {stats['win_rate']:.1f}%, "
-                f"손익 {stats['total_pnl']:+,.0f}원)")
+        recent_win_rate = stats.get('recent_win_rate_10', 0)
+        
+        summary = (f"거래 성과: {stats['total_trades']}건 "
+                  f"(전체승률 {stats['win_rate']:.1f}%, 최근승률 {recent_win_rate:.1f}%, "
+                  f"손익 {stats['total_pnl']:+,.0f}원)")
+        
+        # 거래 기록이 있으면 추가 정보 포함
+        if self.recent_trades:
+            recent_summary = self.get_recent_trades_summary(5)
+            avg_holding = recent_summary['summary']['avg_holding_minutes']
+            summary += f" [최근5건: 평균보유 {avg_holding:.1f}분]"
+        
+        return summary
     
     def __str__(self) -> str:
         """문자열 표현"""

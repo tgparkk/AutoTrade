@@ -51,14 +51,17 @@ class StockManager:
         self.config_loader = get_trading_config_loader()
         self.strategy_config = self.config_loader.load_trading_strategy_config()
         
-        # 캐시 TTL을 설정에서 로드 (기본값: 2초)
+        # 성능 설정 로드
         try:
-            self._cache_ttl = self.config_loader.get_float('cache_ttl_seconds', 'PERFORMANCE', 2.0)
-            self._enable_cache_debug = self.config_loader.get_bool('enable_cache_debug', 'PERFORMANCE', False)
+            self.performance_config = self.config_loader.load_performance_config()
+            self._cache_ttl = self.performance_config.get('cache_ttl_seconds', 2.0)
+            self._enable_cache_debug = self.performance_config.get('enable_cache_debug', False)
+            logger.info(f"성능 설정 로드 완료: 캐시 TTL={self._cache_ttl}초, 디버그={self._enable_cache_debug}")
         except Exception as e:
             logger.warning(f"성능 설정 로드 실패, 기본값 사용: {e}")
-            self._cache_ttl = 2.0  # 기본값: 2초로 변경
+            self._cache_ttl = 2.0
             self._enable_cache_debug = False
+            self.performance_config = {}
         
         # === 5. 락 전략 (세분화) ===
         self._ref_lock = threading.RLock()      # 참조 데이터용 (읽기 빈도 높음)

@@ -437,33 +437,43 @@ class MarketScanner:
         try:
             from api.kis_market_api import get_inquire_daily_itemchartprice
             
+            logger.debug(f"📊 {stock_code} API 호출 시작")
             ohlcv_data = get_inquire_daily_itemchartprice(
                 output_dv="2",
                 itm_no=stock_code,
                 period_code="D",
                 adj_prc="1"
             )
+            
+            # 🔧 디버깅 로그 추가
+            if ohlcv_data is not None:
+                logger.debug(f"📊 {stock_code} API 성공: 타입={type(ohlcv_data)}, 길이={len(ohlcv_data)}")
+            else:
+                logger.debug(f"📊 {stock_code} API 실패: None 반환")
+                
         except Exception as e:
-            logger.debug(f"종합 분석용 API 호출 실패 {stock_code}: {e}")
+            logger.debug(f"📊 {stock_code} API 호출 실패: {e}")
         
         # 기본 분석 (같은 데이터 재사용)
         if _is_data_empty(ohlcv_data):
-            logger.debug(f"OHLCV 데이터가 없어 종목 제외: {stock_code}")
+            logger.debug(f"📊 {stock_code} 데이터 없음으로 종목 제외")
             return None
         
+        logger.debug(f"📊 {stock_code} 기본 분석 시작")
         fundamentals = self._calculate_real_fundamentals(stock_code, ohlcv_data)
         if not fundamentals:
-            logger.debug(f"기본 분석 실패로 종목 제외: {stock_code}")
+            logger.debug(f"📊 {stock_code} 기본 분석 실패로 종목 제외")
             return None
         
         # 캔들패턴 분석 (같은 데이터 재사용)
         if _get_data_length(ohlcv_data) < 5:
-            logger.debug(f"캔들패턴 분석용 데이터 부족으로 종목 제외: {stock_code}")
+            logger.debug(f"📊 {stock_code} 캔들패턴 분석용 데이터 부족으로 종목 제외 (길이: {_get_data_length(ohlcv_data)})")
             return None
         
+        logger.debug(f"📊 {stock_code} 캔들패턴 분석 시작")
         patterns = self._analyze_real_candle_patterns(stock_code, ohlcv_data)
         if not patterns:
-            logger.debug(f"캔들패턴 분석 실패로 종목 제외: {stock_code}")
+            logger.debug(f"📊 {stock_code} 캔들패턴 분석 실패로 종목 제외")
             return None
         
         # 점수 계산 (가중치 적용)
@@ -475,38 +485,94 @@ class MarketScanner:
         
         total_score = volume_score + technical_score + pattern_score + ma_score + momentum_score
         
-        logger.debug(f"{stock_code} 점수 계산: 거래량({volume_score:.1f}) + 기술적({technical_score:.1f}) + "
+        logger.debug(f"📊 {stock_code} 점수 계산 완료: 거래량({volume_score:.1f}) + 기술적({technical_score:.1f}) + "
                     f"패턴({pattern_score:.1f}) + MA({ma_score:.1f}) + 모멘텀({momentum_score:.1f}) = {total_score:.1f}")
         
         return min(total_score, 100)  # 최대 100점
     
-    def get_stock_basic_info(self, stock_code: str) -> Dict:
-        """종목 기본 정보 조회
+    def get_stock_basic_info(self, stock_code: str) -> Optional[Dict]:
+        """종목 기본 정보 조회 (실제 API 사용)
         
         Args:
             stock_code: 종목코드
             
         Returns:
-            종목 기본 정보
+            종목 기본 정보 또는 None (API 실패 시)
         """
-        # StockDataLoader를 사용하여 실제 종목명 조회
-        from utils.stock_data_loader import get_stock_data_loader
-        
-        stock_loader = get_stock_data_loader()
-        stock_name = stock_loader.get_stock_name(stock_code)
-        
-        if not stock_name:
-            logger.warning(f"종목 정보를 찾을 수 없습니다: {stock_code}")
-            stock_name = f"종목{stock_code}"
-        
-        return {
-            'stock_code': stock_code,
-            'stock_name': stock_name,
-            'yesterday_close': 75000,  # 더미 데이터 - TODO: 실제 API 연동
-            'yesterday_volume': 1000000,
-            'market_cap': 500000000000,
-            'sector': '반도체'
-        }
+        try:
+            # 1. StockDataLoader를 사용하여 종목명 조회
+            from utils.stock_data_loader import get_stock_data_loader
+            
+            stock_loader = get_stock_data_loader()
+            stock_name = stock_loader.get_stock_name(stock_code)
+            
+            if not stock_name:
+                logger.warning(f"종목 정보를 찾을 수 없습니다: {stock_code}")
+                return None
+            
+            # 2. 실제 API에서 현재가 및 기본 정보 조회
+            from api.kis_market_api import get_inquire_price
+            
+            price_data = get_inquire_price(div_code="J", itm_no=stock_code)
+            
+            # 3. API 데이터 검증
+            if price_data is None or price_data.empty:
+                logger.warning(f"가격 정보 조회 실패 - 종목 제외: {stock_code}")
+                return None
+            
+            try:
+                # 첫 번째 행의 데이터 사용
+                row = price_data.iloc[0]
+                
+                # 필수 데이터 검증
+                current_price = float(row.get('stck_prpr', 0))
+                yesterday_close = float(row.get('stck_prdy_clpr', 0))
+                volume = int(row.get('acml_vol', 0))
+                
+                # 🔧 전일종가가 0인 경우 현재가로 대체 (장중 API 특성상 발생 가능)
+                if yesterday_close <= 0 and current_price > 0:
+                    yesterday_close = current_price
+                    logger.debug(f"전일종가 0으로 현재가로 대체: {stock_code} {current_price:,}원")
+                
+                # 필수 데이터가 없으면 종목 제외 (완화된 조건)
+                if current_price <= 0 or yesterday_close <= 0:
+                    logger.warning(f"필수 데이터 부족으로 종목 제외: {stock_code} "
+                                 f"현재가:{current_price}, 전일종가:{yesterday_close}, 거래량:{volume}")
+                    return None
+                
+                # 🔧 최소 거래량 조건 완화 (0주도 허용, 장외시간 대비)
+                if volume < 0:  # 음수만 제외
+                    logger.warning(f"비정상 거래량으로 종목 제외: {stock_code} 거래량:{volume}")
+                    return None
+                
+                # 종목 기본 정보 구성
+                basic_info = {
+                    'stock_code': stock_code,
+                    'stock_name': stock_name,
+                    'current_price': current_price,
+                    'yesterday_close': yesterday_close,
+                    'open_price': float(row.get('stck_oprc', current_price)),
+                    'high_price': float(row.get('stck_hgpr', current_price)),
+                    'low_price': float(row.get('stck_lwpr', current_price)),
+                    'volume': volume,
+                    'yesterday_volume': volume,  # 현재 거래량으로 대체
+                    'price_change': float(row.get('prdy_vrss', 0)),
+                    'price_change_rate': float(row.get('prdy_vrss_sign', 0)),
+                    'market_cap': int(row.get('hts_avls', 0)) if 'hts_avls' in row else 0
+                }
+                
+                logger.debug(f"✅ 종목 기본정보 조회 성공: {stock_code}[{stock_name}] "
+                           f"현재가: {current_price:,}원, 전일종가: {yesterday_close:,}원, 거래량: {volume:,}주")
+                
+                return basic_info
+                
+            except Exception as parse_e:
+                logger.warning(f"API 데이터 파싱 오류로 종목 제외: {stock_code}: {parse_e}")
+                return None
+            
+        except Exception as e:
+            logger.error(f"종목 기본정보 조회 오류로 종목 제외: {stock_code}: {e}")
+            return None
     
     def select_top_stocks(self, scan_results: List[Tuple[str, float]]) -> bool:
         """상위 종목들을 StockManager에 등록하고 웹소켓에 구독
@@ -527,16 +593,28 @@ class MarketScanner:
                 # 종목 기본 정보 조회
                 stock_info = self.get_stock_basic_info(stock_code)
                 
-                # StockManager에 등록
+                # API 실패 시 해당 종목 건너뛰기 (실전 안전성)
+                if stock_info is None:
+                    logger.warning(f"종목 기본정보 조회 실패로 건너뛰기: {stock_code}")
+                    continue
+                
+                # StockManager에 등록 (실제 API 데이터 사용)
                 success = self.stock_manager.add_selected_stock(
                     stock_code=stock_code,
                     stock_name=stock_info['stock_name'],
-                    open_price=stock_info['yesterday_close'],  # 전일 종가를 시가로 임시 사용
-                    high_price=stock_info['yesterday_close'],
-                    low_price=stock_info['yesterday_close'], 
-                    close_price=stock_info['yesterday_close'],
-                    volume=stock_info['yesterday_volume'],
-                    selection_score=score
+                    open_price=stock_info['open_price'],
+                    high_price=stock_info['high_price'],
+                    low_price=stock_info['low_price'], 
+                    close_price=stock_info['current_price'],  # 현재가를 종가로 사용
+                    volume=stock_info['volume'],
+                    selection_score=score,
+                    reference_data={
+                        'yesterday_close': stock_info['yesterday_close'],
+                        'yesterday_volume': stock_info['yesterday_volume'],
+                        'market_cap': stock_info['market_cap'],
+                        'price_change': stock_info['price_change'],
+                        'price_change_rate': stock_info['price_change_rate']
+                    }
                 )
                 
                 # 🆕 명시적으로 WATCHING 상태로 설정 (매수 대기 상태)
