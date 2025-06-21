@@ -9,6 +9,7 @@ import requests
 from datetime import datetime
 from typing import Dict, Optional, NamedTuple
 from utils.logger import setup_logger
+from utils.korean_time import now_kst
 
 # 설정 import (settings.py에서 .env 파일을 읽어서 제공)
 from config.settings import (
@@ -32,7 +33,7 @@ class KISEnv(NamedTuple):
 
 # 전역 변수
 _TRENV: Optional[KISEnv] = None
-_last_auth_time = datetime.now()
+_last_auth_time = now_kst()
 _autoReAuth = True
 _DEBUG = False
 
@@ -200,7 +201,7 @@ def auth(svr: str = 'prod', product: str = '01') -> bool:
         logger.error("❌ _TRENV가 설정되지 않았습니다")
         return False
 
-    _last_auth_time = datetime.now()
+    _last_auth_time = now_kst()
 
     if _DEBUG:
         logger.debug(f'[{_last_auth_time}] 인증 완료!')
@@ -210,7 +211,7 @@ def auth(svr: str = 'prod', product: str = '01') -> bool:
 
 def reAuth(svr: str = 'prod', product: str = '01') -> None:
     """토큰 재발급"""
-    n2 = datetime.now()
+    n2 = now_kst()
     # 23시간 후에 미리 재발급 (24시간 = 86400초, 23시간 = 82800초)
     if (n2 - _last_auth_time).total_seconds() >= 82800:
         logger.info("🔄 토큰 자동 재발급 시작 (23시간 경과)")

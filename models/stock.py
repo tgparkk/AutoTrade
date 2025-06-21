@@ -68,10 +68,41 @@ class RealtimeData:
     today_high: float = 0          # 금일 고가
     today_low: float = 0           # 금일 저가
     
-    # 계산 지표
-    volume_spike_ratio: float = 1.0  # 거래량 급증 비율
-    price_change_rate: float = 0.0   # 시가 대비 등락률
-    volatility: float = 0.0          # 변동성
+    # 🆕 KIS 공식 문서 기반 고급 지표들
+    contract_strength: float = 100.0    # 체결강도 (CTTR)
+    buy_ratio: float = 50.0            # 매수비율 (SHNU_RATE)
+    market_pressure: str = 'NEUTRAL'    # 시장압력 (BUY/SELL/NEUTRAL)
+    vi_standard_price: float = 0       # VI발동기준가 (VI_STND_PRC)
+    trading_halt: bool = False         # 거래정지여부 (TRHT_YN)
+    
+    # 전일 대비 정보
+    change_sign: str = '3'             # 전일대비부호 (PRDY_VRSS_SIGN)
+    change_amount: float = 0           # 전일대비 (PRDY_VRSS)
+    change_rate: float = 0.0           # 전일대비율 (PRDY_CTRT)
+    
+    # 가중평균 및 체결 정보
+    weighted_avg_price: float = 0      # 가중평균주식가격 (WGHN_AVRG_STCK_PRC)
+    sell_contract_count: int = 0       # 매도체결건수 (SELN_CNTG_CSNU)
+    buy_contract_count: int = 0        # 매수체결건수 (SHNU_CNTG_CSNU)
+    net_buy_contract_count: int = 0    # 순매수체결건수 (NTBY_CNTG_CSNU)
+    
+    # 호가 잔량 정보
+    total_ask_qty: int = 0             # 총매도호가잔량 (TOTAL_ASKP_RSQN)
+    total_bid_qty: int = 0             # 총매수호가잔량 (TOTAL_BIDP_RSQN)
+    
+    # 거래량 관련
+    volume_turnover_rate: float = 0.0   # 거래량회전율 (VOL_TNRT)
+    prev_same_time_volume: int = 0      # 전일동시간누적거래량 (PRDY_SMNS_HOUR_ACML_VOL)
+    prev_same_time_volume_rate: float = 0.0  # 전일동시간누적거래량비율 (PRDY_SMNS_HOUR_ACML_VOL_RATE)
+    
+    # 시간 구분 정보
+    hour_cls_code: str = '0'           # 시간구분코드 (HOUR_CLS_CODE)
+    market_operation_code: str = '20'   # 신장운영구분코드 (NEW_MKOP_CLS_CODE)
+    
+    # 계산 지표 (기존)
+    volume_spike_ratio: float = 1.0    # 거래량 급증 비율
+    price_change_rate: float = 0.0     # 시가 대비 등락률
+    volatility: float = 0.0            # 변동성
     
     # 업데이트 시간
     last_updated: float = field(default_factory=time.time)
@@ -79,6 +110,39 @@ class RealtimeData:
     def update_timestamp(self):
         """타임스탬프 업데이트"""
         self.last_updated = time.time()
+    
+    def is_market_time(self) -> bool:
+        """시장시간 여부 확인"""
+        return self.hour_cls_code == '0'
+    
+    def is_trading_halted(self) -> bool:
+        """거래정지 여부 확인"""
+        return self.trading_halt or self.trading_halt == 'Y'
+    
+    def has_vi_activation(self) -> bool:
+        """VI 발동 여부 확인"""
+        return self.vi_standard_price > 0
+    
+    def get_market_pressure_score(self) -> float:
+        """시장압력 점수 계산 (-1.0 ~ 1.0)"""
+        if self.market_pressure == 'BUY':
+            return 1.0
+        elif self.market_pressure == 'SELL':
+            return -1.0
+        else:
+            return 0.0
+    
+    def get_bid_ask_imbalance(self) -> float:
+        """호가 불균형 비율 계산"""
+        if self.total_ask_qty + self.total_bid_qty == 0:
+            return 0.0
+        return (self.total_bid_qty - self.total_ask_qty) / (self.total_bid_qty + self.total_ask_qty)
+    
+    def get_contract_imbalance(self) -> float:
+        """체결 불균형 비율 계산"""
+        if self.sell_contract_count + self.buy_contract_count == 0:
+            return 0.0
+        return (self.buy_contract_count - self.sell_contract_count) / (self.buy_contract_count + self.sell_contract_count)
 
 
 @dataclass
@@ -124,7 +188,11 @@ class Stock:
     
     # 주문 정보
     buy_order_id: Optional[str] = None       # 매수 주문번호
+    buy_order_orgno: Optional[str] = None    # 매수 거래소코드 (KRX_FWDG_ORD_ORGNO)
+    buy_order_time: Optional[str] = None     # 매수 주문시간 (ORD_TMD)
     sell_order_id: Optional[str] = None      # 매도 주문번호
+    sell_order_orgno: Optional[str] = None   # 매도 거래소코드 (KRX_FWDG_ORD_ORGNO)
+    sell_order_time_api: Optional[str] = None # 매도 주문시간 (ORD_TMD)
     
     # 시간 정보
     detected_time: datetime = field(default_factory=now_kst)
@@ -214,6 +282,10 @@ class Stock:
             stop_loss_price=self.stop_loss_price,
             buy_order_id=self.buy_order_id,
             sell_order_id=self.sell_order_id,
+            buy_order_orgno=self.buy_order_orgno,
+            buy_order_time=self.buy_order_time,
+            sell_order_orgno=self.sell_order_orgno,
+            sell_order_time_api=self.sell_order_time_api,
             detected_time=self.detected_time,
             order_time=self.order_time,
             execution_time=self.execution_time,

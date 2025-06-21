@@ -263,6 +263,13 @@ class TradeManager:
         """현재 장시간 여부 확인 (테스트 모드: 장외시간도 장중으로 가정)"""
         current_time = now_kst()
         
+        # 테스트 모드에서는 시간 제한 없이 항상 True 반환
+        test_mode = self.strategy_config.get('test_mode', True)
+        if test_mode:
+            logger.debug(f"테스트 모드 활성화 - 시장시간 체크 무시 (현재: {current_time.strftime('%Y-%m-%d %H:%M:%S')})")
+            return True
+        
+        # 실제 운영 모드에서만 시간 체크
         # 주말만 제외하고 평일은 모두 장중으로 처리 (테스트 모드)
         if current_time.weekday() >= 5:  # 주말만 제외
             return False
@@ -356,12 +363,25 @@ class TradeManager:
                     market_monitoring_active = await self._handle_market_hours_start()
                 
                 # 🔥 핵심 매매 로직 - 장시간 중 주기적 매수/매도 처리
-                if self._is_market_hours() and market_monitoring_active:
-                    # RealTimeMonitor의 완성된 monitor_cycle 활용
-                    self.realtime_monitor.monitor_cycle()
+                is_market_hours = self._is_market_hours()
+                logger.info(f"🔍 디버그: is_market_hours={is_market_hours}, market_monitoring_active={market_monitoring_active}")
+                
+                if is_market_hours and market_monitoring_active:
+                    logger.info("✅ 모니터링 사이클 실행 조건 충족 - monitor_cycle() 호출")
+                    # RealTimeMonitor의 monitor_cycle을 비동기 환경에서 안전하게 실행
+                    try:
+                        # 동기 메서드를 별도 스레드에서 실행하지 않고 직접 호출
+                        # (monitor_cycle은 빠른 실행을 위해 설계됨)
+                        self.realtime_monitor.monitor_cycle()
+                        logger.info("✅ monitor_cycle() 실행 완료")
+                    except Exception as e:
+                        logger.error(f"모니터링 사이클 실행 오류: {e}")
+                        # 오류가 발생해도 시스템은 계속 실행
+                else:
+                    logger.info(f"❌ 모니터링 사이클 건너뜀: is_market_hours={is_market_hours}, monitoring_active={market_monitoring_active}")
                 
                 # 장마감 정리 처리
-                elif market_monitoring_active and not self._is_market_hours():
+                if market_monitoring_active and not self._is_market_hours():
                     market_monitoring_active = await self._handle_market_close()
                 
                 # 주기적 상태 체크
@@ -468,8 +488,8 @@ class TradeManager:
     async def _adaptive_sleep(self):
         """적응적 대기 시간"""
         if self._is_market_hours():
-            # 장시간: 30초마다 체크 (빠른 반응)
-            await asyncio.sleep(30)
+            # 장시간: 5초마다 체크 (테스트용으로 단축)
+            await asyncio.sleep(5)
         elif self._should_run_pre_market():
             # 장시작전: 1분마다 체크
             await asyncio.sleep(60)

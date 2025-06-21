@@ -8,6 +8,7 @@ from typing import Dict, Callable, TYPE_CHECKING, Optional
 from datetime import datetime
 from enum import Enum
 from utils.logger import setup_logger
+from utils.korean_time import now_kst
 
 if TYPE_CHECKING:
     from .kis_websocket_data_parser import KISWebSocketDataParser
@@ -105,12 +106,12 @@ class KISWebSocketMessageHandler:
                 decrypted_data = self.data_parser.decrypt_notice_data(raw_data)
                 if decrypted_data:
                     logger.info(f"✅ 체결통보 복호화 성공")
-                    execution_data = {'data': decrypted_data, 'timestamp': datetime.now()}
+                    execution_data = {'data': decrypted_data, 'timestamp': now_kst()}
                     # TR_ID 기반 콜백 실행 (StockManager 연동용)
                     await self._execute_tr_id_callbacks(tr_id, execution_data)
                 else:
                     logger.warning(f"❌ 체결통보 복호화 실패 - 원본 데이터로 처리")
-                    execution_data = {'data': raw_data, 'timestamp': datetime.now()}
+                    execution_data = {'data': raw_data, 'timestamp': now_kst()}
                     # TR_ID 기반 콜백 실행 (StockManager 연동용)
                     await self._execute_tr_id_callbacks(tr_id, execution_data)
 
@@ -141,7 +142,7 @@ class KISWebSocketMessageHandler:
                 # PINGPONG 처리
                 logger.debug(f"### RECV [PINGPONG]")
                 self.stats['ping_pong_count'] = self.stats.get('ping_pong_count', 0) + 1
-                self.stats['last_ping_pong_time'] = datetime.now()
+                self.stats['last_ping_pong_time'] = now_kst()
                 return 'PINGPONG', data
             else:
                 body = json_data.get('body', {})
@@ -166,7 +167,7 @@ class KISWebSocketMessageHandler:
         """메시지 분류 및 처리"""
         try:
             self.stats['messages_received'] += 1
-            self.stats['last_message_time'] = datetime.now()
+            self.stats['last_message_time'] = now_kst()
 
             if message.startswith('{'):
                 # JSON 형태 - 시스템 메시지
@@ -190,15 +191,17 @@ class KISWebSocketMessageHandler:
             for callback in tr_id_callbacks:
                 try:
                     if asyncio.iscoroutinefunction(callback):
-                        if tr_id == 'H0STCNI0':  # 체결통보는 stock_code 없이
-                            await callback(tr_id, data)
-                        else:  # 체결가, 호가는 stock_code 포함
-                            await callback(tr_id, stock_code, data)
+                        if tr_id == 'H0STCNI0':  # 체결통보는 data_type, data 형태
+                            await callback('execution_notice', data)
+                        else:  # 체결가, 호가는 data_type, stock_code, data 형태
+                            data_type = 'stock_price' if tr_id == 'H0STCNT0' else 'stock_orderbook'
+                            await callback(data_type, stock_code, data)
                     else:
-                        if tr_id == 'H0STCNI0':  # 체결통보는 stock_code 없이
-                            callback(tr_id, data)
-                        else:  # 체결가, 호가는 stock_code 포함
-                            callback(tr_id, stock_code, data)
+                        if tr_id == 'H0STCNI0':  # 체결통보는 data_type, data 형태
+                            callback('execution_notice', data)
+                        else:  # 체결가, 호가는 data_type, stock_code, data 형태
+                            data_type = 'stock_price' if tr_id == 'H0STCNT0' else 'stock_orderbook'
+                            callback(data_type, stock_code, data)
                 except Exception as e:
                     logger.error(f"TR_ID 콜백 실행 오류 ({tr_id}): {e}")
 

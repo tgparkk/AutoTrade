@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Tuple, Any
 from utils.logger import setup_logger
 from . import kis_auth as kis
+from utils.korean_time import now_kst
 
 logger = setup_logger(__name__)
 
@@ -114,9 +115,9 @@ def get_inquire_daily_itemchartprice(output_dv: str = "1", div_code: str = "J", 
     tr_id = "FHKST03010100"  # 국내주식기간별시세
 
     if inqr_strt_dt is None:
-        inqr_strt_dt = (datetime.now() - timedelta(days=50)).strftime("%Y%m%d")
+        inqr_strt_dt = (now_kst() - timedelta(days=50)).strftime("%Y%m%d")
     if inqr_end_dt is None:
-        inqr_end_dt = datetime.today().strftime("%Y%m%d")
+        inqr_end_dt = now_kst().strftime("%Y%m%d")
 
     params = {
         "FID_COND_MRKT_DIV_CODE": div_code,     # J:주식/ETF/ETN, W:ELW
@@ -149,7 +150,7 @@ def get_inquire_time_itemconclusion(output_dv: str = "1", div_code: str = "J", i
     tr_id = "FHPST01060000"  # 주식현재가 당일시간대별체결
 
     if inqr_hour is None:
-        now = datetime.now()
+        now = now_kst()
         inqr_hour = f"{now.hour:02d}{now.minute:02d}{now.second:02d}"
 
     params = {
@@ -229,7 +230,7 @@ def get_inquire_time_itemchartprice(output_dv: str = "1", div_code: str = "J", i
 
     # 입력 시간이 없으면 현재 시간 사용
     if input_hour is None:
-        now = datetime.now()
+        now = now_kst()
         input_hour = f"{now.hour:02d}{now.minute:02d}{now.second:02d}"
         logger.debug(f"📊 입력 시간 자동 설정: {input_hour}")
 
@@ -430,8 +431,7 @@ def get_fluctuation_rank(fid_cond_mrkt_div_code: str = "J",
 
     try:
         # 🔧 시간대별 컨텍스트 정보 추가
-        from datetime import datetime
-        current_time = datetime.now()
+        current_time = now_kst()
         time_context = f"현재시간:{current_time.strftime('%H:%M:%S')}"
         is_market_open = 9 <= current_time.hour < 16
         time_context += f" 장운영:{'Y' if is_market_open else 'N'}"
@@ -774,7 +774,7 @@ def get_investor_flow_data() -> Optional[Dict[str, Any]]:
     tr_id = "FHPTJ04400000"  # 외국인/기관 매매종목가집계
 
     # 현재 날짜 사용
-    current_date = datetime.now().strftime("%Y%m%d")
+    current_date = now_kst().strftime("%Y%m%d")
 
     params = {
         "FID_COND_MRKT_DIV_CODE": "J",      # J: 주식
@@ -843,7 +843,7 @@ def get_market_overview() -> Optional[Dict[str, Any]]:
             'kospi': kospi_data,
             'kosdaq': kosdaq_data,
             'investor_flows': investor_data,
-            'timestamp': datetime.now().isoformat()
+            'timestamp': now_kst().isoformat()
         }
 
         logger.debug("✅ 종합 시장 개요 조회 완료")
@@ -1013,7 +1013,7 @@ def get_account_balance() -> Optional[Dict]:
             'total_profit_loss': total_profit_loss,
             'total_profit_loss_rate': (total_profit_loss / total_value * 100) if total_value > 0 else 0.0,
             'stocks': stocks,
-            'inquiry_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            'inquiry_time': now_kst().strftime('%Y-%m-%d %H:%M:%S')
         })
 
         logger.debug(f"💰 계좌요약: {len(stocks)}개 종목, 총 {total_value:,}원, "

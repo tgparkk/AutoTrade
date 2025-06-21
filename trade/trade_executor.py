@@ -55,9 +55,9 @@ class TradeExecutor:
         logger.info("TradeExecutor 초기화 완료 (장시간 최적화 버전)")
     
     def execute_buy_order(self, stock: Stock, price: float, 
-                         quantity: int, order_id: str = None, 
-                         current_positions_count: int) -> bool:
-        """매수 주문 실행 (장시간 최적화)
+                         quantity: int, order_id: Optional[str] = None, 
+                         current_positions_count: int = 0) -> bool:
+        """매수 주문 실행 (실제 KIS API 호출 포함)
         
         Args:
             stock: 주식 객체
@@ -72,10 +72,6 @@ class TradeExecutor:
         start_time = time.time()
         
         try:
-            if not stock:
-                logger.error("주식 객체가 없습니다")
-                return False
-            
             # 비상 정지 체크
             if self.emergency_stop:
                 logger.warning("비상 정지 상태 - 매수 주문 차단")
@@ -108,12 +104,56 @@ class TradeExecutor:
                 self.emergency_stop = True
                 return False
             
-            # 매수 정보 설정
+            # 🔥 실제 KIS API 매수 주문 실행
+            logger.info(f"📤 KIS API 매수 주문 요청: {stock.stock_code} {quantity}주 @{price:,}원")
+            
+            try:
+                from api.kis_order_api import get_order_cash
+                
+                # KIS API 매수 주문 실행
+                order_result = get_order_cash(
+                    ord_dv="buy",           # 매수
+                    itm_no=stock.stock_code, # 종목코드
+                    qty=quantity,           # 수량
+                    unpr=int(price)         # 주문가격 (정수)
+                )
+                
+                if order_result is None or order_result.empty:
+                    logger.error(f"❌ KIS API 매수 주문 실패: {stock.stock_code}")
+                    return False
+                
+                # 🔥 KIS API 응답 구조 완전 활용
+                order_data = order_result.iloc[0]
+                rt_cd = order_data.get('rt_cd', '')
+                msg_cd = order_data.get('msg_cd', '')
+                msg1 = order_data.get('msg1', '')
+                
+                # 성공 여부 확인
+                if rt_cd != '0':
+                    logger.error(f"❌ KIS API 매수 주문 실패: {stock.stock_code} [{msg_cd}] {msg1}")
+                    return False
+                
+                # 주문 정보 추출
+                actual_order_id = str(order_data.get('ODNO', order_id or f"BUY_{int(time.time())}"))
+                krx_orgno = str(order_data.get('KRX_FWDG_ORD_ORGNO', ''))
+                ord_tmd = str(order_data.get('ORD_TMD', ''))
+                
+                logger.info(f"✅ KIS API 매수 주문 접수 성공: {stock.stock_code} "
+                           f"주문번호: {actual_order_id}, 거래소코드: {krx_orgno}, 주문시간: {ord_tmd} "
+                           f"응답: [{msg_cd}] {msg1}")
+                
+            except Exception as api_error:
+                logger.error(f"❌ KIS API 매수 주문 오류 {stock.stock_code}: {api_error}")
+                return False
+            
+            # 🔥 주문 성공 시에만 Stock 객체 상태 업데이트
             stock.status = StockStatus.BUY_ORDERED
             stock.buy_price = price
             stock.buy_quantity = quantity
             stock.buy_amount = total_amount
-            stock.buy_order_id = order_id or f"BUY_{int(time.time())}"
+            stock.buy_order_id = actual_order_id
+            stock.buy_order_orgno = krx_orgno
+            stock.buy_order_time = ord_tmd
             stock.order_time = now_kst()
             
             # 손절가, 익절가 설정 (시장 상황에 따른 동적 조정)
@@ -132,7 +172,8 @@ class TradeExecutor:
             current_hour = now_kst().hour
             self.hourly_trades[current_hour] += 1
             
-            logger.info(f"✅ 매수 주문 실행: {stock.stock_code} {quantity}주 @{price:,}원 "
+            logger.info(f"✅ 매수 주문 실행 완료: {stock.stock_code} {quantity}주 @{price:,}원 "
+                       f"주문번호: {actual_order_id}, 거래소코드: {krx_orgno} "
                        f"(손절: {stock.stop_loss_price:,.0f}, 익절: {stock.target_price:,.0f}) "
                        f"실행시간: {execution_time:.3f}초")
             
@@ -203,7 +244,7 @@ class TradeExecutor:
             if len(self.execution_times) > 100:
                 self.execution_times = self.execution_times[-100:]
     
-    def confirm_buy_execution(self, stock: Stock, executed_price: float = None) -> bool:
+    def confirm_buy_execution(self, stock: Stock, executed_price: Optional[float] = None) -> bool:
         """매수 체결 확인 (장시간 최적화)
         
         Args:
@@ -217,13 +258,14 @@ class TradeExecutor:
             if not stock or stock.status != StockStatus.BUY_ORDERED:
                 return False
             
-            if executed_price and executed_price != stock.buy_price:
+            if executed_price and stock.buy_price and executed_price != stock.buy_price:
                 # 체결가가 다르면 손절가, 익절가 재계산
                 price_diff_rate = (executed_price - stock.buy_price) / stock.buy_price
                 logger.info(f"체결가 차이: {price_diff_rate:+.2%} ({stock.buy_price:,} → {executed_price:,})")
                 
                 stock.buy_price = executed_price
-                stock.buy_amount = executed_price * stock.buy_quantity
+                if stock.buy_quantity:
+                    stock.buy_amount = executed_price * stock.buy_quantity
                 
                 # 손절가, 익절가 재계산
                 stop_loss_rate = self._get_dynamic_stop_loss_rate()
@@ -247,9 +289,9 @@ class TradeExecutor:
             logger.error(f"매수 체결 확인 오류 {stock.stock_code}: {e}")
             return False
     
-    def execute_sell_order(self, stock: Stock, price: float = None, 
-                          reason: str = "manual", order_id: str = None) -> bool:
-        """매도 주문 실행 (장시간 최적화)
+    def execute_sell_order(self, stock: Stock, price: Optional[float] = None, 
+                          reason: str = "manual", order_id: Optional[str] = None) -> bool:
+        """매도 주문 실행 (실제 KIS API 호출 포함)
         
         Args:
             stock: 주식 객체
@@ -262,15 +304,70 @@ class TradeExecutor:
         """
         try:
             if not stock or stock.status != StockStatus.BOUGHT:
-                logger.warning(f"매도 불가 상태: {stock.stock_code if stock else 'None'}")
+                logger.warning(f"매도 불가 상태: {stock.stock_code if stock else 'None'} "
+                             f"상태: {stock.status.value if stock else 'None'}")
                 return False
             
             # 가격이 없으면 캐시에서 조회
             if price is None:
                 price = self.last_price_cache.get(stock.stock_code, stock.buy_price)
+                if price is None or price <= 0:
+                    logger.error(f"유효하지 않은 매도가: {stock.stock_code} 가격: {price}")
+                    return False
             
+            # 매도 수량 확인 (매수 수량과 동일하게)
+            sell_quantity = stock.buy_quantity
+            if not sell_quantity or sell_quantity <= 0:
+                logger.error(f"유효하지 않은 매도 수량: {stock.stock_code} 수량: {sell_quantity}")
+                return False
+            
+            # 🔥 실제 KIS API 매도 주문 실행
+            logger.info(f"📤 KIS API 매도 주문 요청: {stock.stock_code} {sell_quantity}주 @{price:,}원 (사유: {reason})")
+            
+            try:
+                from api.kis_order_api import get_order_cash
+                
+                # KIS API 매도 주문 실행
+                order_result = get_order_cash(
+                    ord_dv="sell",          # 매도
+                    itm_no=stock.stock_code, # 종목코드
+                    qty=sell_quantity,      # 수량
+                    unpr=int(price)         # 주문가격 (정수)
+                )
+                
+                if order_result is None or order_result.empty:
+                    logger.error(f"❌ KIS API 매도 주문 실패: {stock.stock_code}")
+                    return False
+                
+                # 🔥 KIS API 응답 구조 완전 활용
+                order_data = order_result.iloc[0]
+                rt_cd = order_data.get('rt_cd', '')
+                msg_cd = order_data.get('msg_cd', '')
+                msg1 = order_data.get('msg1', '')
+                
+                # 성공 여부 확인
+                if rt_cd != '0':
+                    logger.error(f"❌ KIS API 매도 주문 실패: {stock.stock_code} [{msg_cd}] {msg1}")
+                    return False
+                
+                # 주문 정보 추출
+                actual_order_id = str(order_data.get('ODNO', order_id or f"SELL_{int(time.time())}"))
+                krx_orgno = str(order_data.get('KRX_FWDG_ORD_ORGNO', ''))
+                ord_tmd = str(order_data.get('ORD_TMD', ''))
+                
+                logger.info(f"✅ KIS API 매도 주문 접수 성공: {stock.stock_code} "
+                           f"주문번호: {actual_order_id}, 거래소코드: {krx_orgno}, 주문시간: {ord_tmd} "
+                           f"응답: [{msg_cd}] {msg1}")
+                
+            except Exception as api_error:
+                logger.error(f"❌ KIS API 매도 주문 오류 {stock.stock_code}: {api_error}")
+                return False
+            
+            # 🔥 주문 성공 시에만 Stock 객체 상태 업데이트
             stock.status = StockStatus.SELL_ORDERED
-            stock.sell_order_id = order_id or f"SELL_{int(time.time())}"
+            stock.sell_order_id = actual_order_id
+            stock.sell_order_orgno = krx_orgno
+            stock.sell_order_time_api = ord_tmd
             stock.sell_order_time = now_kst()
             stock.sell_reason = reason
             
@@ -278,7 +375,8 @@ class TradeExecutor:
             current_hour = now_kst().hour
             self.hourly_trades[current_hour] += 1
             
-            logger.info(f"✅ 매도 주문 실행: {stock.stock_code} @{price:,}원 (사유: {reason}) "
+            logger.info(f"✅ 매도 주문 실행 완료: {stock.stock_code} {sell_quantity}주 @{price:,}원 "
+                       f"주문번호: {actual_order_id}, 거래소코드: {krx_orgno} (사유: {reason}) "
                        f"매수가: {stock.buy_price:,}원")
             return True
             
@@ -347,7 +445,7 @@ class TradeExecutor:
             return False
     
     def get_positions_to_sell(self, stocks: List[Stock], 
-                             current_prices: Dict[str, float] = None) -> List[Tuple[Stock, str]]:
+                             current_prices: Optional[Dict[str, float]] = None) -> List[Tuple[Stock, str]]:
         """매도할 포지션들을 선별 (장시간 최적화)
         
         Args:
@@ -480,4 +578,97 @@ class TradeExecutor:
     
     def __str__(self) -> str:
         """문자열 표현"""
-        return f"TradeExecutor(거래수: {self.total_trades}, 손익: {self.total_pnl:+,.0f}원)" 
+        return f"TradeExecutor(거래수: {self.total_trades}, 손익: {self.total_pnl:+,.0f}원)"
+    
+    def cancel_order(self, stock: Stock, order_type: str = "buy") -> bool:
+        """주문 취소 (KIS API 활용)
+        
+        Args:
+            stock: 주식 객체
+            order_type: 주문 타입 ("buy" 또는 "sell")
+            
+        Returns:
+            취소 성공 여부
+        """
+        try:
+            if order_type == "buy":
+                if stock.status != StockStatus.BUY_ORDERED:
+                    logger.warning(f"매수 주문 상태가 아님: {stock.stock_code} 상태: {stock.status.value}")
+                    return False
+                
+                order_id = stock.buy_order_id
+                orgno = stock.buy_order_orgno
+                
+            elif order_type == "sell":
+                if stock.status != StockStatus.SELL_ORDERED:
+                    logger.warning(f"매도 주문 상태가 아님: {stock.stock_code} 상태: {stock.status.value}")
+                    return False
+                
+                order_id = stock.sell_order_id
+                orgno = stock.sell_order_orgno
+                
+            else:
+                logger.error(f"잘못된 주문 타입: {order_type}")
+                return False
+            
+            if not order_id or not orgno:
+                logger.error(f"주문 정보 부족: {stock.stock_code} order_id={order_id}, orgno={orgno}")
+                return False
+            
+            # 🔥 KIS API 주문 취소 실행 (거래소코드 활용)
+            logger.info(f"📤 KIS API 주문 취소 요청: {stock.stock_code} {order_type} "
+                       f"주문번호: {order_id}, 거래소코드: {orgno}")
+            
+            try:
+                from api.kis_order_api import get_order_rvsecncl
+                
+                # KIS API 주문 취소 실행
+                cancel_result = get_order_rvsecncl(
+                    ord_orgno=orgno,                    # 거래소코드 (KRX_FWDG_ORD_ORGNO)
+                    orgn_odno=order_id,                 # 원주문번호 (ODNO)
+                    ord_dvsn="00",                      # 주문구분 (지정가)
+                    rvse_cncl_dvsn_cd="02",            # 취소구분 (02: 취소)
+                    ord_qty=0,                          # 취소수량 (0: 전량취소)
+                    ord_unpr=0,                         # 취소단가 (취소시 0)
+                    qty_all_ord_yn="Y"                  # 잔량전부주문여부 (Y: 전량)
+                )
+                
+                if cancel_result is None or cancel_result.empty:
+                    logger.error(f"❌ KIS API 주문 취소 실패: {stock.stock_code}")
+                    return False
+                
+                # 🔥 KIS API 응답 구조 활용
+                cancel_data = cancel_result.iloc[0]
+                rt_cd = cancel_data.get('rt_cd', '')
+                msg_cd = cancel_data.get('msg_cd', '')
+                msg1 = cancel_data.get('msg1', '')
+                
+                # 성공 여부 확인
+                if rt_cd != '0':
+                    logger.error(f"❌ KIS API 주문 취소 실패: {stock.stock_code} [{msg_cd}] {msg1}")
+                    return False
+                
+                logger.info(f"✅ KIS API 주문 취소 성공: {stock.stock_code} {order_type} "
+                           f"주문번호: {order_id} 응답: [{msg_cd}] {msg1}")
+                
+                # 주문 취소 성공 시 상태 복원
+                if order_type == "buy":
+                    stock.status = StockStatus.WATCHING
+                    stock.buy_order_id = None
+                    stock.buy_order_orgno = None
+                    stock.buy_order_time = None
+                elif order_type == "sell":
+                    stock.status = StockStatus.BOUGHT
+                    stock.sell_order_id = None
+                    stock.sell_order_orgno = None
+                    stock.sell_order_time_api = None
+                
+                return True
+                
+            except Exception as api_error:
+                logger.error(f"❌ KIS API 주문 취소 오류 {stock.stock_code}: {api_error}")
+                return False
+            
+        except Exception as e:
+            logger.error(f"주문 취소 오류 {stock.stock_code}: {e}")
+            return False 

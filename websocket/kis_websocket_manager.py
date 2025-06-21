@@ -6,7 +6,7 @@ import threading
 import time
 from typing import Dict, List, Optional, Callable
 from utils.logger import setup_logger
-from datetime import datetime
+from utils.korean_time import now_kst
 
 # 분리된 컴포넌트들
 from websocket.kis_websocket_connection import KISWebSocketConnection
@@ -436,7 +436,7 @@ class KISWebSocketManager:
                 'subscribed_stocks': len(self.get_subscribed_stocks()),
                 'subscription_capacity': self.subscription_manager.has_subscription_capacity(),
                 'usage': self.get_websocket_usage(),
-                'last_check_time': datetime.now().strftime('%H:%M:%S')
+                'last_check_time': now_kst().strftime('%H:%M:%S')
             }
         except Exception as e:
             return {
@@ -445,8 +445,27 @@ class KISWebSocketManager:
                 'subscribed_stocks': 0,
                 'subscription_capacity': False,
                 'usage': '0/0',
-                'last_check_time': datetime.now().strftime('%H:%M:%S'),
+                'last_check_time': now_kst().strftime('%H:%M:%S'),
                 'error': str(e)
+            }
+
+    def get_health_status(self) -> Dict:
+        """웹소켓 연결 상태 및 헬스 체크"""
+        try:
+            return {
+                'is_connected': self.is_connected,
+                'is_running': self.is_running,
+                'subscribed_stocks': len(self.subscription_manager.subscribed_stocks),
+                'message_stats': self.message_handler.get_stats(),
+                'last_check_time': now_kst().strftime('%H:%M:%S')
+            }
+        except Exception as e:
+            logger.error(f"헬스 상태 조회 오류: {e}")
+            return {
+                'error': str(e),
+                'last_check_time': now_kst().strftime('%H:%M:%S'),
+                'is_connected': False,
+                'is_running': False
             }
 
     # ==========================================

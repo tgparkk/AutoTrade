@@ -8,6 +8,7 @@ from .market_scanner import MarketScanner
 from .realtime_monitor import RealTimeMonitor
 from .trade_executor import TradeExecutor
 from .trade_manager import TradeManager
+from .order_recovery_manager import OrderRecoveryManager
 
 __all__ = [
     'Stock',
@@ -17,5 +18,6 @@ __all__ = [
     'MarketScanner',
     'RealTimeMonitor',
     'TradeExecutor',
-    'TradeManager'
+    'TradeManager',
+    'OrderRecoveryManager'
 ] 

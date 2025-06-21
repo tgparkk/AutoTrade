@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Optional, Dict, List
 from utils.logger import setup_logger
 from . import kis_auth as kis
+from utils.korean_time import now_kst
 
 logger = setup_logger(__name__)
 
@@ -17,9 +18,9 @@ def get_order_cash(ord_dv: str = "", itm_no: str = "", qty: int = 0, unpr: int =
     url = '/uapi/domestic-stock/v1/trading/order-cash'
 
     if ord_dv == "buy":
-        tr_id = "TTTC0802U"  # 주식 현금 매수 주문 [모의투자] VTTC0802U
+        tr_id = "TTTC0012U"  # 주식 현금 매수 주문 [모의투자] VTTC0802U
     elif ord_dv == "sell":
-        tr_id = "TTTC0801U"  # 주식 현금 매도 주문 [모의투자] VTTC0801U
+        tr_id = "TTTC0011U"  # 주식 현금 매도 주문 [모의투자] VTTC0801U
     else:
         logger.error("매수/매도 구분 확인 필요")
         return None
@@ -284,7 +285,7 @@ async def check_and_cancel_external_orders(kis_api_manager) -> None:
 
         logger.info(f"📋 당일 주문 조회 결과: {len(today_orders)}건")
 
-        current_time = datetime.now()
+        current_time = now_kst()
         stale_order_timeout = 300  # 5분
 
         for order_info in today_orders:

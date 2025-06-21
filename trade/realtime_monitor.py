@@ -1,5 +1,5 @@
 """
-장시간 실시간 모니터링을 담당하는 RealTimeMonitor 클래스 (장시간 최적화 버전)
+장시간 실시간 모니터링을 담당하는 RealTimeMonitor 클래스 (웹소켓 기반 최적화 버전)
 """
 
 import time
@@ -11,16 +11,16 @@ from collections import defaultdict, deque
 from models.stock import Stock, StockStatus
 from .stock_manager import StockManager
 from .trade_executor import TradeExecutor
+from .order_recovery_manager import OrderRecoveryManager
 from utils.korean_time import now_kst
 from utils.logger import setup_logger
 from utils import get_trading_config_loader
-from api.kis_market_api import get_inquire_price
 
 logger = setup_logger(__name__)
 
 
 class RealTimeMonitor:
-    """장시간 실시간 모니터링을 담당하는 클래스 (최적화 버전)"""
+    """장시간 실시간 모니터링을 담당하는 클래스 (웹소켓 기반 최적화 버전)"""
     
     def __init__(self, stock_manager: StockManager, trade_executor: TradeExecutor):
         """RealTimeMonitor 초기화
@@ -32,8 +32,14 @@ class RealTimeMonitor:
         self.stock_manager = stock_manager
         self.trade_executor = trade_executor
         
+        # OrderRecoveryManager 초기화
+        self.order_recovery_manager = OrderRecoveryManager(stock_manager, trade_executor)
+        
         # StockManager에 자신의 참조 설정 (체결통보 통계 업데이트용)
         self.stock_manager.set_realtime_monitor_ref(self)
+        
+        # StockManager에 OrderRecoveryManager 참조 설정
+        self.stock_manager.set_order_recovery_manager(self.order_recovery_manager)
         
         # 설정 로드
         self.config_loader = get_trading_config_loader()
@@ -51,11 +57,8 @@ class RealTimeMonitor:
         self.monitor_thread = None
         self.websocket_manager = None
         
-        # 장시간 성능 최적화
-        self.price_cache = {}  # 가격 캐시 (종목코드: 최신 가격)
-        self.last_update_time = {}  # 마지막 업데이트 시간
-        self.volume_history = defaultdict(lambda: deque(maxlen=10))  # 거래량 히스토리
-        self.alert_sent = set()  # 중복 알림 방지
+        # 중복 알림 방지 (유지)
+        self.alert_sent = set()
         
         # 장시간 통계
         self.market_scan_count = 0
@@ -79,7 +82,13 @@ class RealTimeMonitor:
         self.market_volatility_threshold = 0.02  # 2% 이상 변동시 빠른 모니터링
         self.high_volume_threshold = 3.0  # 3배 이상 거래량 증가시 빠른 모니터링
         
-        logger.info("RealTimeMonitor 초기화 완료 (장시간 최적화 버전)")
+        # 🆕 공식 문서 기반 고급 매매 지표 임계값
+        self.contract_strength_threshold = 120.0  # 체결강도 임계값
+        self.buy_ratio_threshold = 60.0          # 매수비율 임계값 (%)
+        self.vi_activation_threshold = True       # VI 발동 시 거래 중단 여부
+        self.market_pressure_weight = 0.3        # 시장압력 가중치
+        
+        logger.info("RealTimeMonitor 초기화 완료 (웹소켓 기반 최적화 버전)")
     
     def is_market_open(self) -> bool:
         """시장 개장 여부 확인
@@ -172,24 +181,27 @@ class RealTimeMonitor:
             logger.info(f"모니터링 주기 조정: {target_interval}초 (시장단계: {market_phase})")
     
     def _detect_high_volatility(self) -> bool:
-        """고변동성 시장 감지
+        """고변동성 시장 감지 (웹소켓 데이터 기반)
         
         Returns:
             고변동성 여부
         """
         try:
-            # 보유 종목들의 변동률 확인
+            # 보유 종목들의 변동률 확인 (StockManager 데이터 활용)
             positions = self.stock_manager.get_all_positions()
             high_volatility_count = 0
             
             for position in positions:
                 if position.status in [StockStatus.BOUGHT, StockStatus.WATCHING]:
-                    current_price = self.price_cache.get(position.stock_code, position.close_price)
-                    # close_price를 기준가로 사용 (open_price 속성이 없으므로)
-                    price_change_rate = abs((current_price - position.close_price) / position.close_price)
+                    # 🔥 웹소켓 실시간 데이터 직접 활용
+                    current_price = position.realtime_data.current_price
+                    reference_price = position.reference_data.yesterday_close
                     
-                    if price_change_rate >= self.market_volatility_threshold:
-                        high_volatility_count += 1
+                    if reference_price > 0:
+                        price_change_rate = abs((current_price - reference_price) / reference_price)
+                        
+                        if price_change_rate >= self.market_volatility_threshold:
+                            high_volatility_count += 1
             
             # 30% 이상의 종목이 고변동성이면 전체적으로 고변동성 시장
             return high_volatility_count >= len(positions) * 0.3
@@ -198,8 +210,8 @@ class RealTimeMonitor:
             logger.error(f"고변동성 감지 오류: {e}")
             return False
     
-    def fetch_realtime_data(self, stock_code: str) -> Optional[Dict]:
-        """실시간 데이터 조회 (장시간 최적화)
+    def get_realtime_data(self, stock_code: str) -> Optional[Dict]:
+        """웹소켓 실시간 데이터 조회 (StockManager 기반)
         
         Args:
             stock_code: 종목코드
@@ -208,108 +220,42 @@ class RealTimeMonitor:
             실시간 데이터 또는 None
         """
         try:
-            # 캐시된 데이터 확인 (3초 이내면 캐시 사용)
-            now = time.time()
-            if (stock_code in self.last_update_time and 
-                now - self.last_update_time[stock_code] < 3):
-                return self._get_cached_data(stock_code)
+            # 🔥 StockManager의 실시간 데이터를 직접 활용
+            stock = self.stock_manager.get_selected_stock(stock_code)
+            if not stock:
+                return None
             
-            # 실제 API 호출 (TODO: KIS API 연동)
-            realtime_data = self._fetch_from_api(stock_code)
-            
-            if realtime_data:
-                # 캐시 업데이트
-                self.price_cache[stock_code] = realtime_data['current_price']
-                self.last_update_time[stock_code] = now
-                
-                # 거래량 히스토리 업데이트
-                self.volume_history[stock_code].append(realtime_data['volume'])
-                
-                # 거래량 급증 감지
-                volume_spike_ratio = self._calculate_volume_spike(stock_code)
-                realtime_data['volume_spike_ratio'] = volume_spike_ratio
-            
-            return realtime_data
+            # 웹소켓에서 수신한 실시간 데이터 반환
+            return {
+                'stock_code': stock_code,
+                'current_price': stock.realtime_data.current_price,
+                'open_price': stock.reference_data.yesterday_close,  # 기준가로 전일 종가 사용
+                'high_price': stock.realtime_data.today_high,
+                'low_price': stock.realtime_data.today_low,
+                'volume': stock.realtime_data.today_volume,
+                'contract_volume': stock.realtime_data.contract_volume,
+                'price_change_rate': stock.realtime_data.price_change_rate,
+                'volume_spike_ratio': stock.realtime_data.volume_spike_ratio,
+                'bid_price': stock.realtime_data.bid_price,
+                'ask_price': stock.realtime_data.ask_price,
+                'bid_prices': stock.realtime_data.bid_prices,
+                'ask_prices': stock.realtime_data.ask_prices,
+                'bid_volumes': stock.realtime_data.bid_volumes,
+                'ask_volumes': stock.realtime_data.ask_volumes,
+                'timestamp': now_kst(),
+                'last_updated': stock.realtime_data.last_updated,
+                'source': 'websocket'
+            }
             
         except Exception as e:
             logger.error(f"실시간 데이터 조회 실패 {stock_code}: {e}")
             return None
     
-    def _get_cached_data(self, stock_code: str) -> Optional[Dict]:
-        """캐시된 데이터 반환"""
-        if stock_code in self.price_cache:
-            return {
-                'stock_code': stock_code,
-                'current_price': self.price_cache[stock_code],
-                'is_cached': True,
-                'cache_time': self.last_update_time.get(stock_code, 0)
-            }
-        return None
-    
-    def _fetch_from_api(self, stock_code: str) -> Optional[Dict]:
-        """KIS API에서 실시간 데이터 조회"""
-        try:
-            # KIS API를 통한 현재가 조회
-            price_data = get_inquire_price(div_code="J", itm_no=stock_code)
-            
-            if price_data is None or price_data.empty:
-                logger.warning(f"KIS API 현재가 조회 실패: {stock_code}")
-                return None
-            
-            # DataFrame에서 첫 번째 행 데이터 추출
-            data = price_data.iloc[0]
-            
-            # 필요한 데이터 필드 추출 및 변환
-            current_price = float(data.get('stck_prpr', 0))        # 주식 현재가
-            open_price = float(data.get('stck_oprc', 0))           # 시가
-            high_price = float(data.get('stck_hgpr', 0))           # 고가
-            low_price = float(data.get('stck_lwpr', 0))            # 저가
-            volume = int(data.get('acml_vol', 0))                  # 누적 거래량
-            trading_volume = int(data.get('acml_tr_pbmn', 0))      # 누적 거래대금
-            
-            # 전일 종가 대비 등락률 계산
-            prev_close_price = float(data.get('stck_sdpr', current_price))  # 전일 종가
-            price_change_rate = 0.0
-            if prev_close_price > 0:
-                price_change_rate = (current_price - prev_close_price) / prev_close_price
-            
-            # 거래량 급증 비율 계산
-            volume_spike_ratio = self._calculate_volume_spike(stock_code)
-            
-            return {
-                'stock_code': stock_code,
-                'current_price': current_price,
-                'open_price': open_price,
-                'high_price': high_price,
-                'low_price': low_price,
-                'volume': volume,
-                'trading_volume': trading_volume,
-                'price_change_rate': price_change_rate,
-                'volume_spike_ratio': volume_spike_ratio,
-                'timestamp': now_kst(),
-                'raw_data': data.to_dict()  # 원본 데이터 보관
-            }
-            
-        except Exception as e:
-            logger.error(f"KIS API 실시간 데이터 조회 오류 {stock_code}: {e}")
-            return None
-    
-    def _calculate_volume_spike(self, stock_code: str) -> float:
-        """거래량 급증 비율 계산"""
-        volumes = list(self.volume_history[stock_code])
-        if len(volumes) < 2:
-            return 1.0
-        
-        recent_avg = sum(volumes[-3:]) / len(volumes[-3:]) if len(volumes) >= 3 else volumes[-1]
-        previous_avg = sum(volumes[:-3]) / len(volumes[:-3]) if len(volumes) > 3 else volumes[0]
-        
-        return recent_avg / previous_avg if previous_avg > 0 else 1.0
-    
     def analyze_buy_conditions(self, stock: Stock, realtime_data: Dict) -> bool:
-        """매수 조건 분석 (장시간 최적화)
+        """매수 조건 분석 (공식 문서 기반 고급 지표 활용)
         
         Args:
-            position: 포지션 정보
+            stock: 주식 객체
             realtime_data: 실시간 데이터
             
         Returns:
@@ -317,8 +263,20 @@ class RealTimeMonitor:
         """
         try:
             # 기본 조건 체크
-            price_change_rate = realtime_data.get('price_change_rate', 0)
+            price_change_rate = realtime_data.get('price_change_rate', 0) / 100  # % to decimal
             volume_spike_ratio = realtime_data.get('volume_spike_ratio', 1.0)
+            
+            # 🆕 공식 문서 기반 고급 지표 추출 (웹소켓에서 받은 추가 데이터)
+            contract_strength = getattr(stock.realtime_data, 'contract_strength', 100.0)
+            buy_ratio = getattr(stock.realtime_data, 'buy_ratio', 50.0)
+            market_pressure = getattr(stock.realtime_data, 'market_pressure', 'NEUTRAL')
+            vi_standard_price = getattr(stock.realtime_data, 'vi_standard_price', 0)
+            trading_halt = getattr(stock.realtime_data, 'trading_halt', False)
+            
+            # VI 발동 및 거래정지 체크
+            if trading_halt or (vi_standard_price > 0 and self.vi_activation_threshold):
+                logger.debug(f"거래 제외: {stock.stock_code} (거래정지: {trading_halt}, VI발동: {vi_standard_price > 0})")
+                return False
             
             # 시장 단계별 조건 조정
             market_phase = self.get_market_phase()
@@ -327,34 +285,61 @@ class RealTimeMonitor:
             if market_phase == 'opening':
                 volume_threshold = self.strategy_config.get('volume_increase_threshold', 2.0) * 1.5
                 price_threshold = 0.015  # 1.5%
+                contract_strength_min = self.contract_strength_threshold * 1.2
+                buy_ratio_min = self.buy_ratio_threshold * 1.1
             # 마감 전에는 보수적 접근
             elif market_phase == 'pre_close':
                 volume_threshold = self.strategy_config.get('volume_increase_threshold', 2.0) * 2.0
                 price_threshold = 0.02   # 2%
+                contract_strength_min = self.contract_strength_threshold * 1.5
+                buy_ratio_min = self.buy_ratio_threshold * 1.2
             else:
                 volume_threshold = self.strategy_config.get('volume_increase_threshold', 2.0)
                 price_threshold = 0.01   # 1%
+                contract_strength_min = self.contract_strength_threshold
+                buy_ratio_min = self.buy_ratio_threshold
             
-            # 거래량 급증 조건
+            # 🔥 고급 매수 조건 (공식 문서 기반)
+            
+            # 1. 기본 조건
             volume_condition = volume_spike_ratio >= volume_threshold
-            
-            # 가격 상승 조건
             price_condition = price_change_rate >= price_threshold
             
-            # 최소 거래량 조건
+            # 2. 최소 거래량 조건
             min_volume = self.strategy_config.get('volume_min_threshold', 100000)
             volume_min_condition = realtime_data.get('volume', 0) >= min_volume
             
-            # 패턴 점수 조건 (시장 단계별 조정)
+            # 3. 패턴 점수 조건 (시장 단계별 조정)
             min_pattern_score = 70.0 if market_phase != 'opening' else 75.0
             pattern_condition = stock.total_pattern_score >= min_pattern_score
+            
+            # 4. 🆕 체결강도 조건 (KIS 공식 필드)
+            strength_condition = contract_strength >= contract_strength_min
+            
+            # 5. 🆕 매수비율 조건 (KIS 공식 필드)
+            buy_ratio_condition = buy_ratio >= buy_ratio_min
+            
+            # 6. 🆕 시장압력 조건 (KIS 공식 필드)
+            market_pressure_condition = market_pressure in ['BUY', 'NEUTRAL']
+            
+            # 7. 호가 스프레드 조건 (너무 넓은 스프레드 제외)
+            bid_price = realtime_data.get('bid_price', 0)
+            ask_price = realtime_data.get('ask_price', 0)
+            spread_condition = True
+            if bid_price > 0 and ask_price > 0:
+                spread_rate = (ask_price - bid_price) / bid_price
+                spread_condition = spread_rate <= 0.01  # 1% 이하 스프레드만 허용
             
             # 중복 신호 방지
             signal_key = f"{stock.stock_code}_buy"
             duplicate_prevention = signal_key not in self.alert_sent
             
+            # 🔥 최종 매수 신호 판단 (모든 조건 통합)
             buy_signal = (volume_condition and price_condition and 
-                         volume_min_condition and pattern_condition and duplicate_prevention)
+                         volume_min_condition and pattern_condition and
+                         strength_condition and buy_ratio_condition and
+                         market_pressure_condition and spread_condition and
+                         duplicate_prevention)
             
             if buy_signal:
                 self.alert_sent.add(signal_key)
@@ -362,6 +347,9 @@ class RealTimeMonitor:
                 logger.info(f"🚀 {stock.stock_code} 매수 신호 ({market_phase}): "
                            f"거래량({volume_spike_ratio:.1f}배≥{volume_threshold:.1f}), "
                            f"상승률({price_change_rate:.2%}≥{price_threshold:.1%}), "
+                           f"체결강도({contract_strength:.1f}≥{contract_strength_min:.1f}), "
+                           f"매수비율({buy_ratio:.1f}%≥{buy_ratio_min:.1f}%), "
+                           f"시장압력({market_pressure}), "
                            f"패턴점수({stock.total_pattern_score:.1f}≥{min_pattern_score})")
             
             return buy_signal
@@ -371,10 +359,10 @@ class RealTimeMonitor:
             return False
     
     def analyze_sell_conditions(self, stock: Stock, realtime_data: Dict) -> Optional[str]:
-        """매도 조건 분석 (장시간 최적화)
+        """매도 조건 분석 (공식 문서 기반 고급 지표 활용)
         
         Args:
-            position: 포지션 정보
+            stock: 주식 객체
             realtime_data: 실시간 데이터
             
         Returns:
@@ -383,6 +371,16 @@ class RealTimeMonitor:
         try:
             current_price = realtime_data.get('current_price', stock.close_price)
             market_phase = self.get_market_phase()
+            
+            # 🆕 공식 문서 기반 고급 지표 추출
+            contract_strength = getattr(stock.realtime_data, 'contract_strength', 100.0)
+            buy_ratio = getattr(stock.realtime_data, 'buy_ratio', 50.0)
+            market_pressure = getattr(stock.realtime_data, 'market_pressure', 'NEUTRAL')
+            trading_halt = getattr(stock.realtime_data, 'trading_halt', False)
+            
+            # 거래정지 시 즉시 매도
+            if trading_halt:
+                return "trading_halt"
             
             # 시장 단계별 매도 조건 조정
             if market_phase == 'pre_close':
@@ -405,10 +403,26 @@ class RealTimeMonitor:
             if stock.is_holding_period_exceeded():
                 return "holding_period"
             
-            # 급락 감지 매도 (최근 5분간 3% 이상 하락)
-            price_history = self._get_price_history(stock.stock_code)
-            if self._detect_rapid_decline(price_history, current_price):
-                return "rapid_decline"
+            # 🆕 고급 매도 조건 (공식 문서 기반)
+            
+            # 1. 체결강도 급락 매도 (매도 압력 증가)
+            if contract_strength <= 80.0:  # 체결강도 80 이하
+                return "weak_contract_strength"
+            
+            # 2. 매수비율 급락 매도 (매도 우세)
+            if buy_ratio <= 30.0:  # 매수비율 30% 이하
+                return "low_buy_ratio"
+            
+            # 3. 시장압력 변화 매도
+            if market_pressure == 'SELL':
+                return "market_pressure_sell"
+            
+            # 4. 급락 감지 매도 (변동성 기반)
+            volatility = stock.realtime_data.volatility
+            if volatility >= 5.0:  # 일중 변동성 5% 이상
+                price_from_high = (stock.realtime_data.today_high - current_price) / stock.realtime_data.today_high
+                if price_from_high >= 0.03:  # 고점 대비 3% 이상 하락
+                    return "high_volatility_decline"
             
             return None
             
@@ -416,23 +430,8 @@ class RealTimeMonitor:
             logger.error(f"매도 조건 분석 오류 {stock.stock_code}: {e}")
             return None
     
-    def _get_price_history(self, stock_code: str) -> List[float]:
-        """가격 히스토리 조회 (임시 구현)"""
-        # TODO: 실제 가격 히스토리 저장 및 조회 구현
-        return [self.price_cache.get(stock_code, 75000)] * 5
-    
-    def _detect_rapid_decline(self, price_history: List[float], current_price: float) -> bool:
-        """급락 감지"""
-        if len(price_history) < 2:
-            return False
-        
-        max_recent_price = max(price_history[-5:])
-        decline_rate = (max_recent_price - current_price) / max_recent_price
-        
-        return decline_rate >= 0.03  # 3% 이상 급락
-    
     def process_buy_ready_stocks(self) -> Dict[str, int]:
-        """매수 준비 상태 종목들 처리 (장시간 최적화)
+        """매수 준비 상태 종목들 처리 (웹소켓 기반)
         
         Returns:
             처리 결과 딕셔너리 {'checked': 확인한 종목 수, 'signaled': 신호 발생 수, 'ordered': 주문 접수 수}
@@ -447,8 +446,8 @@ class RealTimeMonitor:
                 result['checked'] += 1
                 
                 try:
-                    # 실시간 데이터 조회
-                    realtime_data = self.fetch_realtime_data(stock.stock_code)
+                    # 🔥 웹소켓 실시간 데이터 조회 (API 호출 대신)
+                    realtime_data = self.get_realtime_data(stock.stock_code)
                     
                     if not realtime_data:
                         continue
@@ -479,9 +478,6 @@ class RealTimeMonitor:
                                            f"{buy_quantity}주 @{realtime_data['current_price']:,}원 "
                                            f"- 체결 대기 중 (웹소켓 체결통보 대기)")
                                 
-                                # 체결 확인은 웹소켓 체결통보에서 처리하므로 여기서는 하지 않음
-                                # StockManager의 웹소켓 콜백에서 체결통보 수신 시 처리됨
-                                
                             else:
                                 # 주문 접수 실패
                                 logger.error(f"❌ 매수 주문 접수 실패: {stock.stock_code} "
@@ -498,7 +494,7 @@ class RealTimeMonitor:
             return result
     
     def process_sell_ready_stocks(self) -> Dict[str, int]:
-        """매도 준비 상태 종목들 처리 (장시간 최적화)
+        """매도 준비 상태 종목들 처리 (웹소켓 기반)
         
         Returns:
             처리 결과 딕셔너리 {'checked': 확인한 종목 수, 'signaled': 신호 발생 수, 'ordered': 주문 접수 수}
@@ -513,8 +509,8 @@ class RealTimeMonitor:
                 result['checked'] += 1
                 
                 try:
-                    # 실시간 데이터 조회
-                    realtime_data = self.fetch_realtime_data(stock.stock_code)
+                    # 🔥 웹소켓 실시간 데이터 조회 (API 호출 대신)
+                    realtime_data = self.get_realtime_data(stock.stock_code)
                     
                     if not realtime_data:
                         continue
@@ -564,7 +560,7 @@ class RealTimeMonitor:
         """매수량 계산 (장시간 최적화)
         
         Args:
-            position: 포지션 정보
+            stock: 주식 객체
             
         Returns:
             매수량
@@ -599,29 +595,37 @@ class RealTimeMonitor:
             return 0
     
     def monitor_cycle(self):
-        """모니터링 사이클 실행 (장시간 최적화)"""
+        """모니터링 사이클 실행 (웹소켓 기반 최적화)"""
         try:
             self.market_scan_count += 1
             
             # 시장 상황 확인 및 모니터링 주기 조정
             self.adjust_monitoring_frequency()
             
-            # 시장 열려있지 않으면 대기
-            # if not self.is_market_open():
-            #     if self.market_scan_count % 60 == 0:  # 10분마다 로그
-            #         logger.info("시장 마감 - 대기 중...")
-            #     return
+            # 테스트 모드 설정 (config에서 로드)
+            test_mode = self.strategy_config.get('test_mode', True)
             
-            # # 거래 시간이 아니면 모니터링만
-            # if not self.is_trading_time():
-            #     market_phase = self.get_market_phase()
-            #     if market_phase == 'lunch':
-            #         if self.market_scan_count % 30 == 0:  # 5분마다 로그
-            #             logger.info("점심시간 - 모니터링만 실행")
-            #     elif market_phase == 'closing':
-            #         logger.info("장 마감 시간 - 보유 포지션 정리 중...")
-            #         self.process_sell_ready_stocks()  # 마감 시간에는 매도만
-            #     return
+            if not test_mode:
+                # 실제 운영 모드: 시장시간 체크
+                if not self.is_market_open():
+                    if self.market_scan_count % 60 == 0:  # 10분마다 로그
+                        logger.info("시장 마감 - 대기 중...")
+                    return
+                
+                # 거래 시간이 아니면 모니터링만
+                if not self.is_trading_time():
+                    market_phase = self.get_market_phase()
+                    if market_phase == 'lunch':
+                        if self.market_scan_count % 30 == 0:  # 5분마다 로그
+                            logger.info("점심시간 - 모니터링만 실행")
+                    elif market_phase == 'closing':
+                        logger.info("장 마감 시간 - 보유 포지션 정리 중...")
+                        self.process_sell_ready_stocks()  # 마감 시간에는 매도만
+                    return
+            else:
+                # 테스트 모드: 시간 제한 없이 실행
+                if self.market_scan_count % 100 == 0:  # 주기적으로 테스트 모드 알림
+                    logger.debug("테스트 모드 - 시장시간 무관하게 실행 중")
             
             # 성능 로깅 (5분마다)
             if self.market_scan_count % (300 // self.current_monitoring_interval) == 0:
@@ -633,6 +637,10 @@ class RealTimeMonitor:
             # 매도 준비 종목 처리  
             sell_result = self.process_sell_ready_stocks()
             
+            # 🔧 정체된 주문 타임아웃 체크 (30초마다 - 6회마다 실행)
+            if self.market_scan_count % (30 // self.current_monitoring_interval) == 0:
+                self._check_stuck_orders()
+            
             # 주기적 상태 리포트 (1분마다)
             if self.market_scan_count % (60 // self.current_monitoring_interval) == 0:
                 self._log_status_report(buy_result, sell_result)
@@ -641,7 +649,7 @@ class RealTimeMonitor:
             logger.error(f"모니터링 사이클 오류: {e}")
     
     def _log_performance_metrics(self):
-        """성능 지표 로깅"""
+        """성능 지표 로깅 (웹소켓 기반)"""
         try:
             market_phase = self.get_market_phase()
             positions = self.stock_manager.get_all_positions()
@@ -653,7 +661,8 @@ class RealTimeMonitor:
             for pos in positions:
                 status_counts[pos.status.value] += 1
                 if pos.status == StockStatus.BOUGHT:
-                    current_price = self.price_cache.get(pos.stock_code, pos.close_price)
+                    # 🔥 웹소켓 실시간 데이터 직접 활용
+                    current_price = pos.realtime_data.current_price
                     unrealized_pnl = pos.calculate_unrealized_pnl(current_price)
                     total_unrealized_pnl += unrealized_pnl
             
@@ -670,6 +679,25 @@ class RealTimeMonitor:
         except Exception as e:
             logger.error(f"성능 지표 로깅 오류: {e}")
     
+    def _check_stuck_orders(self):
+        """정체된 주문들 타임아웃 체크 및 자동 복구 (OrderRecoveryManager 사용)"""
+        try:
+            # OrderRecoveryManager를 통한 자동 복구
+            recovered_count = self.order_recovery_manager.auto_recover_stuck_orders()
+            
+            if recovered_count > 0:
+                logger.warning(f"⚠️ 정체된 주문 {recovered_count}건 자동 복구 완료")
+            
+            # 추가 검증: 비정상적인 상태 전환 체크
+            issues = self.order_recovery_manager.validate_stock_transitions()
+            if issues:
+                logger.warning(f"🚨 비정상적인 상태 전환 감지:")
+                for issue in issues[:5]:  # 최대 5개만 로그
+                    logger.warning(f"   - {issue}")
+                    
+        except Exception as e:
+            logger.error(f"정체된 주문 체크 오류: {e}")
+    
     def _log_status_report(self, buy_result: Dict[str, int], sell_result: Dict[str, int]):
         """상태 리포트 로깅"""
         try:
@@ -685,7 +713,7 @@ class RealTimeMonitor:
             logger.error(f"상태 리포트 로깅 오류: {e}")
     
     def start_monitoring(self):
-        """모니터링 시작 (장시간 최적화)"""
+        """모니터링 시작 (웹소켓 기반 최적화)"""
         if self.is_monitoring:
             logger.warning("이미 모니터링이 실행 중입니다")
             return
@@ -703,7 +731,7 @@ class RealTimeMonitor:
         self.monitor_thread = threading.Thread(target=self._monitoring_loop, daemon=True)
         self.monitor_thread.start()
         
-        logger.info("🚀 실시간 모니터링 시작 (장시간 최적화 모드)")
+        logger.info("🚀 실시간 모니터링 시작 (웹소켓 기반 최적화 모드)")
     
     def stop_monitoring(self):
         """모니터링 중지"""
@@ -738,8 +766,8 @@ class RealTimeMonitor:
             logger.error(f"최종 성능 리포트 오류: {e}")
     
     def _monitoring_loop(self):
-        """모니터링 루프 (장시간 최적화)"""
-        logger.info("모니터링 루프 시작")
+        """모니터링 루프 (웹소켓 기반 최적화)"""
+        logger.info("모니터링 루프 시작 (웹소켓 기반)")
         
         while self.is_monitoring:
             try:
@@ -768,7 +796,10 @@ class RealTimeMonitor:
         logger.info("모니터링 루프 종료")
     
     def get_monitoring_status(self) -> Dict:
-        """모니터링 상태 정보 반환 (장시간 최적화)"""
+        """모니터링 상태 정보 반환 (웹소켓 기반 최적화)"""
+        # OrderRecoveryManager 통계 포함
+        recovery_stats = self.order_recovery_manager.get_recovery_statistics()
+        
         return {
             'is_monitoring': self.is_monitoring,
             'is_market_open': self.is_market_open(),
@@ -779,12 +810,13 @@ class RealTimeMonitor:
             'buy_signals_detected': self.buy_signals_detected,
             'sell_signals_detected': self.sell_signals_detected,
             'orders_executed': self.orders_executed,
-            'cached_stocks': len(self.price_cache),
-            'alerts_sent': len(self.alert_sent)
+            'websocket_stocks': len(self.stock_manager.realtime_data),  # 웹소켓 관리 종목 수
+            'alerts_sent': len(self.alert_sent),
+            'order_recovery_stats': recovery_stats  # 🆕 주문 복구 통계 추가
         }
     
     def force_sell_all_positions(self) -> int:
-        """모든 포지션 강제 매도 (장 마감 전)
+        """모든 포지션 강제 매도 (장 마감 전) - 웹소켓 기반
         
         Returns:
             매도 처리된 포지션 수
@@ -796,7 +828,8 @@ class RealTimeMonitor:
         
         for stock in holding_stocks:
             try:
-                realtime_data = self.fetch_realtime_data(stock.stock_code)
+                # 🔥 웹소켓 실시간 데이터 활용
+                realtime_data = self.get_realtime_data(stock.stock_code)
                 current_price = realtime_data['current_price'] if realtime_data else stock.close_price
                 
                 success = self.trade_executor.execute_sell_order(
@@ -821,4 +854,5 @@ class RealTimeMonitor:
         return (f"RealTimeMonitor(모니터링: {self.is_monitoring}, "
                 f"주기: {self.current_monitoring_interval}초, "
                 f"스캔횟수: {self.market_scan_count}, "
-                f"신호감지: 매수{self.buy_signals_detected}/매도{self.sell_signals_detected})") 
+                f"신호감지: 매수{self.buy_signals_detected}/매도{self.sell_signals_detected}, "
+                f"웹소켓종목: {len(self.stock_manager.realtime_data)}개)") 

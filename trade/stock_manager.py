@@ -46,7 +46,19 @@ class StockManager:
         # === 4. 성능 최적화용 캐시 ===
         self._stock_cache: Dict[str, Stock] = {}  # 완전한 Stock 객체 캐시
         self._cache_timestamps: Dict[str, float] = {}  # 캐시 타임스탬프
-        self._cache_ttl = 1.0  # 캐시 유효시간 1초
+        
+        # 설정 로드
+        self.config_loader = get_trading_config_loader()
+        self.strategy_config = self.config_loader.load_trading_strategy_config()
+        
+        # 캐시 TTL을 설정에서 로드 (기본값: 2초)
+        try:
+            self._cache_ttl = self.config_loader.get_float('cache_ttl_seconds', 'PERFORMANCE', 2.0)
+            self._enable_cache_debug = self.config_loader.get_bool('enable_cache_debug', 'PERFORMANCE', False)
+        except Exception as e:
+            logger.warning(f"성능 설정 로드 실패, 기본값 사용: {e}")
+            self._cache_ttl = 2.0  # 기본값: 2초로 변경
+            self._enable_cache_debug = False
         
         # === 5. 락 전략 (세분화) ===
         self._ref_lock = threading.RLock()      # 참조 데이터용 (읽기 빈도 높음)
@@ -57,10 +69,6 @@ class StockManager:
         # === 6. 기본 설정 ===
         self.candidate_stocks: List[str] = []
         self.max_selected_stocks = 15
-        
-        # 설정 로드
-        self.config_loader = get_trading_config_loader()
-        self.strategy_config = self.config_loader.load_trading_strategy_config()
         
         logger.info("StockManager 초기화 완료 (하이브리드 방식, 성능 최적화)")
     
@@ -76,7 +84,7 @@ class StockManager:
         if len(self.reference_stocks) >= self.max_selected_stocks:
             logger.warning(f"최대 선정 종목 수 초과: {len(self.reference_stocks)}/{self.max_selected_stocks}")
             return False
-        
+            
         if stock_code in self.reference_stocks:
             logger.warning(f"이미 선정된 종목입니다: {stock_code}")
             return False
@@ -127,7 +135,11 @@ class StockManager:
                     'target_price': None,
                     'stop_loss_price': None,
                     'buy_order_id': None,
+                    'buy_order_orgno': None,
+                    'buy_order_time': None,
                     'sell_order_id': None,
+                    'sell_order_orgno': None,
+                    'sell_order_time_api': None,
                     'order_time': None,
                     'execution_time': None,
                     'sell_order_time': None,
@@ -201,6 +213,8 @@ class StockManager:
                 if (stock_code in self._stock_cache and 
                     stock_code in self._cache_timestamps and
                     current_time - self._cache_timestamps[stock_code] < self._cache_ttl):
+                    if self._enable_cache_debug:
+                        logger.debug(f"Stock 객체 캐시 사용: {stock_code} (TTL: {self._cache_ttl}초)")
                     return self._stock_cache[stock_code]
             
             # 2. 캐시 미스 - 새로 생성
@@ -252,7 +266,11 @@ class StockManager:
                 target_price=trade_info.get('target_price'),
                 stop_loss_price=trade_info.get('stop_loss_price'),
                 buy_order_id=trade_info.get('buy_order_id'),
+                buy_order_orgno=trade_info.get('buy_order_orgno'),
+                buy_order_time=trade_info.get('buy_order_time'),
                 sell_order_id=trade_info.get('sell_order_id'),
+                sell_order_orgno=trade_info.get('sell_order_orgno'),
+                sell_order_time_api=trade_info.get('sell_order_time_api'),
                 
                 # 시간 정보
                 detected_time=trade_info.get('detected_time', now_kst()),
@@ -318,20 +336,30 @@ class StockManager:
                           price_change_rate: Optional[float] = None):
         """종목 가격 업데이트 (빠른 실시간 업데이트)"""
         try:
-            # 실시간 데이터만 빠르게 업데이트
+            # 원자적 업데이트를 위한 단일 락 사용
             with self._realtime_lock:
                 if stock_code not in self.realtime_data:
                     return
                 
                 realtime = self.realtime_data[stock_code]
+                
+                # 모든 업데이트를 원자적으로 수행
+                old_price = realtime.current_price
                 realtime.current_price = current_price
                 if today_volume is not None:
                     realtime.today_volume = today_volume
                 if price_change_rate is not None:
                     realtime.price_change_rate = price_change_rate
                 realtime.update_timestamp()
+                
+                # 디버그 로그 (큰 가격 변동 감지)
+                if old_price > 0:
+                    price_change = abs((current_price - old_price) / old_price)
+                    if price_change > 0.05:  # 5% 이상 변동
+                        logger.info(f"⚡ 큰 가격 변동 감지: {stock_code} "
+                                   f"{old_price:,}원 → {current_price:,}원 ({price_change:.1%})")
             
-            # 미실현 손익 계산 (매수 완료 상태만)
+            # 미실현 손익 계산 (별도 락으로 분리하여 성능 최적화)
             with self._status_lock:
                 if (self.trading_status.get(stock_code) == StockStatus.BOUGHT and
                     stock_code in self.trade_info):
@@ -346,11 +374,50 @@ class StockManager:
                         trade_info['unrealized_pnl_rate'] = pnl_rate
                         trade_info['updated_at'] = now_kst()
             
-            # 캐시 무효화
+            # 캐시 무효화 (마지막에 수행)
             self._invalidate_cache(stock_code)
             
         except Exception as e:
             logger.error(f"가격 업데이트 오류 {stock_code}: {e}")
+    
+    def get_stock_snapshot(self, stock_code: str) -> Optional[Dict]:
+        """원자적 스냅샷 조회 (매매 전략용)
+        
+        Returns:
+            현재 시점의 일관된 데이터 스냅샷
+        """
+        try:
+            # 모든 데이터를 한 번에 원자적으로 조회
+            with self._realtime_lock, self._status_lock:
+                if stock_code not in self.realtime_data:
+                    return None
+                
+                realtime = self.realtime_data[stock_code]
+                status = self.trading_status.get(stock_code, StockStatus.WATCHING)
+                trade_info = self.trade_info.get(stock_code, {})
+                
+                # 일관된 스냅샷 생성
+                snapshot = {
+                    'stock_code': stock_code,
+                    'current_price': realtime.current_price,
+                    'today_volume': realtime.today_volume,
+                    'price_change_rate': realtime.price_change_rate,
+                    'bid_price': realtime.bid_price,
+                    'ask_price': realtime.ask_price,
+                    'status': status,
+                    'buy_price': trade_info.get('buy_price'),
+                    'buy_quantity': trade_info.get('buy_quantity'),
+                    'unrealized_pnl': trade_info.get('unrealized_pnl'),
+                    'unrealized_pnl_rate': trade_info.get('unrealized_pnl_rate'),
+                    'snapshot_time': time.time(),
+                    'last_updated': realtime.last_updated
+                }
+                
+                return snapshot
+                
+        except Exception as e:
+            logger.error(f"스냅샷 조회 오류 {stock_code}: {e}")
+            return None
     
     def change_stock_status(self, stock_code: str, new_status: StockStatus, 
                            reason: str = "", **trade_updates) -> bool:
@@ -444,50 +511,29 @@ class StockManager:
     def get_all_positions(self) -> List[Stock]:
         return self.get_all_selected_stocks()
     
+    # === 주문 복구 관련 메서드들 (OrderRecoveryManager로 이관됨) ===
+    # 이 메서드들은 하위 호환성을 위해 유지하되, 실제 로직은 OrderRecoveryManager에 위임
+    
     def validate_stock_transitions(self) -> List[str]:
-        """비정상적인 상태 전환 감지"""
-        issues = []
-        current_time = now_kst()
-        
-        with self._status_lock:
-            for stock_code, status in self.trading_status.items():
-                if status in [StockStatus.BUY_ORDERED, StockStatus.SELL_ORDERED]:
-                    trade_info = self.trade_info.get(stock_code, {})
-                    order_time = trade_info.get('order_time')
-                    if order_time:
-                        minutes_since_order = (current_time - order_time).total_seconds() / 60
-                        if minutes_since_order > 3:
-                            issues.append(f"{stock_code}: {status.value} 상태 3분 초과")
-        
-        return issues
+        """비정상적인 상태 전환 감지 (OrderRecoveryManager에 위임)"""
+        if hasattr(self, '_order_recovery_manager') and self._order_recovery_manager:
+            return self._order_recovery_manager.validate_stock_transitions()
+        else:
+            logger.warning("OrderRecoveryManager가 설정되지 않음 - 빈 결과 반환")
+            return []
     
     def auto_recover_stuck_orders(self) -> int:
-        """정체된 주문들 자동 복구"""
-        recovered = 0
-        current_time = now_kst()
-        
-        with self._status_lock:
-            for stock_code, status in self.trading_status.items():
-                trade_info = self.trade_info.get(stock_code, {})
-                
-                if status == StockStatus.BUY_ORDERED:
-                    order_time = trade_info.get('order_time')
-                    if order_time and (current_time - order_time).total_seconds() / 60 > 3:
-                        logger.warning(f"정체된 매수 주문 복구: {stock_code}")
-                        self.change_stock_status(stock_code, StockStatus.BUY_READY, "3분 타임아웃")
-                        recovered += 1
-                
-                elif status == StockStatus.SELL_ORDERED:
-                    sell_order_time = trade_info.get('sell_order_time')
-                    if sell_order_time and (current_time - sell_order_time).total_seconds() / 60 > 3:
-                        logger.warning(f"정체된 매도 주문 복구: {stock_code}")
-                        self.change_stock_status(stock_code, StockStatus.BOUGHT, "3분 타임아웃")
-                        recovered += 1
-        
-        if recovered > 0:
-            logger.info(f"총 {recovered}개 정체 주문 복구 완료")
-        
-        return recovered
+        """정체된 주문들 자동 복구 (OrderRecoveryManager에 위임)"""
+        if hasattr(self, '_order_recovery_manager') and self._order_recovery_manager:
+            return self._order_recovery_manager.auto_recover_stuck_orders()
+        else:
+            logger.warning("OrderRecoveryManager가 설정되지 않음 - 복구 건너뜀")
+            return 0
+    
+    def set_order_recovery_manager(self, order_recovery_manager):
+        """OrderRecoveryManager 참조 설정"""
+        self._order_recovery_manager = order_recovery_manager
+        logger.info("✅ OrderRecoveryManager 참조 설정 완료")
     
     def __str__(self) -> str:
         with self._ref_lock:
@@ -498,24 +544,153 @@ class StockManager:
     # === 웹소켓 실시간 데이터 처리 (최적화) ===
     
     def handle_realtime_price(self, data_type: str, stock_code: str, data: Dict):
-        """실시간 가격 데이터 처리 (최적화된 버전)"""
+        """실시간 가격 데이터 처리 (KIS 공식 문서 기반 고급 지표 포함)"""
         try:
             # 빠른 존재 확인 (락 없이)
             if stock_code not in self.realtime_data:
                 return
             
-            # 데이터 추출
-            current_price = float(data.get('stck_prpr', 0))
-            acc_volume = int(data.get('acml_vol', 0))
+            # 🔥 KIS 공식 문서 기반 핵심 데이터 추출
+            current_price = float(data.get('current_price', 0))
+            acc_volume = int(data.get('acc_volume', 0))
+            
+            # 기본 가격 정보
+            open_price = float(data.get('open_price', 0))
+            high_price = float(data.get('high_price', 0))
+            low_price = float(data.get('low_price', 0))
+            contract_volume = int(data.get('contract_volume', 0))
+            
+            # 🆕 KIS 공식 문서 기반 고급 지표들
+            contract_strength = float(data.get('contract_strength', 100.0))
+            buy_ratio = float(data.get('buy_ratio', 50.0))
+            market_pressure = data.get('market_pressure', 'NEUTRAL')
+            vi_standard_price = float(data.get('vi_standard_price', 0))
+            trading_halt = data.get('trading_halt', 'N') == 'Y'
+            
+            # 전일 대비 정보
+            change_sign = data.get('change_sign', '3')
+            change_amount = float(data.get('change_amount', 0))
+            change_rate = float(data.get('change_rate', 0.0))
+            
+            # 체결 정보
+            weighted_avg_price = float(data.get('weighted_avg_price', 0))
+            sell_contract_count = int(data.get('sell_contract_count', 0))
+            buy_contract_count = int(data.get('buy_contract_count', 0))
+            net_buy_contract_count = int(data.get('net_buy_contract_count', 0))
+            
+            # 호가 잔량 정보
+            total_ask_qty = int(data.get('total_ask_qty', 0))
+            total_bid_qty = int(data.get('total_bid_qty', 0))
+            
+            # 거래량 관련
+            volume_turnover_rate = float(data.get('volume_turnover_rate', 0.0))
+            prev_same_time_volume = int(data.get('prev_same_time_volume', 0))
+            prev_same_time_volume_rate = float(data.get('prev_same_time_volume_rate', 0.0))
+            
+            # 시간 구분 정보
+            hour_cls_code = data.get('hour_cls_code', '0')
+            market_operation_code = data.get('market_operation_code', '20')
             
             if current_price <= 0:
                 return
             
-            # 실시간 데이터만 빠르게 업데이트
-            self.update_stock_price(stock_code, current_price, acc_volume)
+            # 🔥 실시간 데이터 전체 업데이트 (원자적 처리)
+            with self._realtime_lock:
+                if stock_code not in self.realtime_data:
+                    return
+                
+                realtime = self.realtime_data[stock_code]
+                old_price = realtime.current_price
+                
+                # 기본 가격 정보 업데이트
+                realtime.current_price = current_price
+                realtime.today_volume = acc_volume
+                realtime.contract_volume = contract_volume
+                if high_price > 0:
+                    realtime.today_high = max(realtime.today_high, high_price)
+                if low_price > 0:
+                    realtime.today_low = min(realtime.today_low, low_price) if realtime.today_low > 0 else low_price
+                
+                # 🆕 KIS 공식 문서 기반 고급 지표 업데이트
+                realtime.contract_strength = contract_strength
+                realtime.buy_ratio = buy_ratio
+                realtime.market_pressure = market_pressure
+                realtime.vi_standard_price = vi_standard_price
+                realtime.trading_halt = trading_halt
+                
+                # 전일 대비 정보 업데이트
+                realtime.change_sign = change_sign
+                realtime.change_amount = change_amount
+                realtime.change_rate = change_rate
+                
+                # 체결 정보 업데이트
+                realtime.weighted_avg_price = weighted_avg_price
+                realtime.sell_contract_count = sell_contract_count
+                realtime.buy_contract_count = buy_contract_count
+                realtime.net_buy_contract_count = net_buy_contract_count
+                
+                # 호가 잔량 정보 업데이트
+                realtime.total_ask_qty = total_ask_qty
+                realtime.total_bid_qty = total_bid_qty
+                
+                # 거래량 관련 업데이트
+                realtime.volume_turnover_rate = volume_turnover_rate
+                realtime.prev_same_time_volume = prev_same_time_volume
+                realtime.prev_same_time_volume_rate = prev_same_time_volume_rate
+                
+                # 시간 구분 정보 업데이트
+                realtime.hour_cls_code = hour_cls_code
+                realtime.market_operation_code = market_operation_code
+                
+                # 계산 지표 업데이트
+                if self.reference_stocks.get(stock_code):
+                    ref_data = self.reference_stocks[stock_code]
+                    if ref_data.yesterday_close > 0:
+                        realtime.price_change_rate = (current_price - ref_data.yesterday_close) / ref_data.yesterday_close * 100
+                    if ref_data.avg_daily_volume > 0:
+                        realtime.volume_spike_ratio = acc_volume / ref_data.avg_daily_volume
+                
+                # 변동성 계산 (일중 고저 기준)
+                if realtime.today_high > 0 and realtime.today_low > 0:
+                    realtime.volatility = (realtime.today_high - realtime.today_low) / realtime.today_low * 100
+                
+                realtime.update_timestamp()
+                
+                # 디버그 로그 (큰 가격 변동 또는 특이 상황 감지)
+                if old_price > 0:
+                    price_change = abs((current_price - old_price) / old_price)
+                    if price_change > 0.05:  # 5% 이상 변동
+                        logger.info(f"⚡ 큰 가격 변동: {stock_code} "
+                                   f"{old_price:,}원 → {current_price:,}원 ({price_change:.1%}) "
+                                   f"체결강도:{contract_strength:.1f} 매수비율:{buy_ratio:.1f}%")
+                
+                # 특이 상황 로그
+                if trading_halt:
+                    logger.warning(f"🚨 거래정지: {stock_code}")
+                if vi_standard_price > 0:
+                    logger.warning(f"⚠️ VI 발동: {stock_code} 기준가:{vi_standard_price:,}원")
+            
+            # 미실현 손익 계산 (별도 락으로 분리하여 성능 최적화)
+            with self._status_lock:
+                if (self.trading_status.get(stock_code) == StockStatus.BOUGHT and
+                    stock_code in self.trade_info):
+                    trade_info = self.trade_info[stock_code]
+                    buy_price = trade_info.get('buy_price')
+                    buy_quantity = trade_info.get('buy_quantity')
+                    
+                    if buy_price and buy_quantity:
+                        pnl = (current_price - buy_price) * buy_quantity
+                        pnl_rate = (current_price - buy_price) / buy_price * 100
+                        trade_info['unrealized_pnl'] = pnl
+                        trade_info['unrealized_pnl_rate'] = pnl_rate
+                        trade_info['updated_at'] = now_kst()
+            
+            # 캐시 무효화 (마지막에 수행)
+            self._invalidate_cache(stock_code)
             
         except Exception as e:
             logger.error(f"실시간 가격 처리 오류 [{stock_code}]: {e}")
+            logger.debug(f"처리 실패 데이터: {data}")
     
     def handle_realtime_orderbook(self, data_type: str, stock_code: str, data: Dict):
         """실시간 호가 데이터 처리"""
