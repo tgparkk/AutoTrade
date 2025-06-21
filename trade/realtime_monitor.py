@@ -340,7 +340,7 @@ class RealTimeMonitor:
                          strength_condition and buy_ratio_condition and
                          market_pressure_condition and spread_condition and
                          duplicate_prevention)
-            buy_signal =  True
+            #buy_signal =  True
             
             if buy_signal:
                 self.alert_sent.add(signal_key)
