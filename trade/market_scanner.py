@@ -318,7 +318,251 @@ class MarketScanner:
         else:
             return 'neutral'
     
-
+    # ===== 이격도 계산 메서드 섹션 =====
+    
+    def _calculate_divergence_rate(self, current_price: float, ma_price: float) -> float:
+        """이격도 계산 (이동평균 대비)
+        
+        Args:
+            current_price: 현재가
+            ma_price: 이동평균가
+            
+        Returns:
+            이격도 (%) - 양수: 이평선 위, 음수: 이평선 아래
+        """
+        if current_price <= 0 or ma_price <= 0:
+            return 0.0
+        
+        return (current_price - ma_price) / ma_price * 100
+    
+    def _calculate_sma(self, prices: List[float], period: int) -> float:
+        """단순이동평균 계산
+        
+        Args:
+            prices: 가격 리스트
+            period: 기간
+            
+        Returns:
+            단순이동평균
+        """
+        if len(prices) < period or period <= 0:
+            return 0.0
+        
+        valid_prices = [p for p in prices[:period] if p > 0]
+        if not valid_prices:
+            return 0.0
+        
+        return sum(valid_prices) / len(valid_prices)
+    
+    def _get_divergence_analysis(self, stock_code: str, ohlcv_data: Any) -> Optional[Dict]:
+        """종목별 이격도 종합 분석 (스크리닝용)
+        
+        Args:
+            stock_code: 종목코드
+            ohlcv_data: OHLCV 데이터
+            
+        Returns:
+            이격도 분석 결과 또는 None
+        """
+        try:
+            # 데이터 변환
+            data_list = _convert_to_dict_list(ohlcv_data)
+            if len(data_list) < 20:
+                return None
+            
+            # 현재가 및 과거 가격 데이터
+            current_price = float(data_list[0].get('stck_clpr', 0))
+            if current_price <= 0:
+                return None
+            
+            prices = [float(day.get('stck_clpr', 0)) for day in data_list[:20]]
+            
+            # 각종 이격도 계산
+            divergences = {}
+            
+            # 5일선 이격도
+            sma_5 = self._calculate_sma(prices, 5)
+            if sma_5 > 0:
+                divergences['sma_5'] = self._calculate_divergence_rate(current_price, sma_5)
+            
+            # 10일선 이격도
+            sma_10 = self._calculate_sma(prices, 10)
+            if sma_10 > 0:
+                divergences['sma_10'] = self._calculate_divergence_rate(current_price, sma_10)
+            
+            # 20일선 이격도
+            sma_20 = self._calculate_sma(prices, 20)
+            if sma_20 > 0:
+                divergences['sma_20'] = self._calculate_divergence_rate(current_price, sma_20)
+            
+            # 전일 대비 변화율
+            if len(data_list) > 1:
+                yesterday_price = float(data_list[1].get('stck_clpr', 0))
+                if yesterday_price > 0:
+                    divergences['yesterday_change'] = self._calculate_divergence_rate(current_price, yesterday_price)
+            
+            return {
+                'current_price': current_price,
+                'divergences': divergences,
+                'sma_values': {'sma_5': sma_5, 'sma_10': sma_10, 'sma_20': sma_20}
+            }
+            
+        except Exception as e:
+            logger.debug(f"이격도 분석 실패 {stock_code}: {e}")
+            return None
+    
+    def _get_divergence_signal(self, divergence_analysis: Dict) -> Dict[str, Any]:
+        """이격도 기반 매매 신호 생성 (스크리닝용)
+        
+        Args:
+            divergence_analysis: 이격도 분석 결과
+            
+        Returns:
+            매매 신호 딕셔너리
+        """
+        if not divergence_analysis:
+            return {'signal': 'HOLD', 'reason': '분석 데이터 없음', 'score': 0}
+        
+        divergences = divergence_analysis.get('divergences', {})
+        
+        sma_5_div = divergences.get('sma_5', 0)
+        sma_10_div = divergences.get('sma_10', 0) 
+        sma_20_div = divergences.get('sma_20', 0)
+        
+        signal = 'HOLD'
+        reason = []
+        score = 0
+        
+        # 매수 신호 (과매도) - 스크리닝에서는 보수적 기준 적용
+        if sma_20_div <= -5 or (sma_10_div <= -3 and sma_5_div <= -2):
+            signal = 'BUY'
+            score = 15 + abs(min(sma_20_div, sma_10_div, sma_5_div)) * 0.5  # 이격도 기반 점수
+            reason.append(f"과매도 구간 (5일:{sma_5_div:.1f}%, 10일:{sma_10_div:.1f}%, 20일:{sma_20_div:.1f}%)")
+        
+        # 상승 모멘텀 (적당한 상승 이격도)
+        elif 1 <= sma_5_div <= 3 and 0 <= sma_10_div <= 2 and -1 <= sma_20_div <= 1:
+            signal = 'MOMENTUM'
+            score = 10  # 모멘텀 점수
+            reason.append(f"상승 모멘텀 (5일:{sma_5_div:.1f}%, 10일:{sma_10_div:.1f}%, 20일:{sma_20_div:.1f}%)")
+        
+        # 과매수 주의 (스크리닝에서는 제외 대상)
+        elif sma_20_div >= 10 or sma_10_div >= 7 or sma_5_div >= 5:
+            signal = 'OVERHEATED'
+            score = -5  # 감점
+            reason.append(f"과열 구간 (5일:{sma_5_div:.1f}%, 10일:{sma_10_div:.1f}%, 20일:{sma_20_div:.1f}%)")
+        
+        return {
+            'signal': signal,
+            'reason': '; '.join(reason) if reason else '중립',
+            'score': score,
+            'divergences': divergences
+        }
+    
+    # ===== 실시간 이격도 분석 (Stock 객체용) =====
+    
+    def get_stock_divergence_rates(self, stock: 'Stock') -> Dict[str, float]:
+        """Stock 객체의 실시간 이격도 계산 (데이트레이딩용)
+        
+        Args:
+            stock: Stock 객체
+            
+        Returns:
+            각종 이격도 정보
+        """
+        current_price = stock.realtime_data.current_price
+        if current_price <= 0:
+            return {}
+        
+        divergences = {}
+        
+        # 20일선 이격도 (기준 데이터에서)
+        if stock.reference_data.sma_20 > 0:
+            divergences['sma_20'] = self._calculate_divergence_rate(current_price, stock.reference_data.sma_20)
+        
+        # 전일 종가 이격도
+        if stock.reference_data.yesterday_close > 0:
+            divergences['yesterday_close'] = self._calculate_divergence_rate(current_price, stock.reference_data.yesterday_close)
+        
+        # 당일 시가 이격도 (분봉 데이터가 있을 경우)
+        if stock.minute_1_data:
+            first_candle = stock.minute_1_data[0]
+            if first_candle.open_price > 0:
+                divergences['today_open'] = self._calculate_divergence_rate(current_price, first_candle.open_price)
+        
+        # 5분봉 단순 이동평균 이격도 (최근 5개 캔들)
+        if len(stock.minute_5_data) >= 5:
+            recent_prices = [candle.close_price for candle in stock.minute_5_data[-5:]]
+            sma_5min = self._calculate_sma(recent_prices, 5)
+            if sma_5min > 0:
+                divergences['sma_5min'] = self._calculate_divergence_rate(current_price, sma_5min)
+        
+        # 당일 고저점 대비 위치 (%)
+        if stock.realtime_data.today_high > 0 and stock.realtime_data.today_low > 0:
+            day_range = stock.realtime_data.today_high - stock.realtime_data.today_low
+            if day_range > 0:
+                divergences['daily_position'] = (
+                    (current_price - stock.realtime_data.today_low) / day_range * 100
+                )
+        
+        return divergences
+    
+    def get_stock_divergence_signal(self, stock: 'Stock') -> Dict[str, Any]:
+        """Stock 객체의 이격도 기반 실시간 매매 신호 (데이트레이딩용)
+        
+        Args:
+            stock: Stock 객체
+            
+        Returns:
+            매매 신호 딕셔너리
+        """
+        divergences = self.get_stock_divergence_rates(stock)
+        if not divergences:
+            return {'signal': 'HOLD', 'reason': '이격도 계산 불가', 'strength': 0}
+        
+        sma_20_div = divergences.get('sma_20', 0)
+        sma_5min_div = divergences.get('sma_5min', 0)
+        daily_pos = divergences.get('daily_position', 50)
+        
+        signal = 'HOLD'
+        reason = []
+        strength = 0  # 신호 강도 (0~10)
+        
+        # 강한 매수 신호
+        if sma_20_div <= -3 and daily_pos <= 20:
+            signal = 'STRONG_BUY'
+            strength = 8 + min(abs(sma_20_div), 7)
+            reason.append(f"강한 매수 (20일선:{sma_20_div:.1f}%, 일봉위치:{daily_pos:.0f}%)")
+        
+        # 일반 매수 신호
+        elif sma_20_div <= -2 or (sma_5min_div <= -1.5 and daily_pos <= 30):
+            signal = 'BUY'
+            strength = 5 + min(abs(sma_20_div), 3)
+            reason.append(f"매수 신호 (20일선:{sma_20_div:.1f}%, 5분선:{sma_5min_div:.1f}%)")
+        
+        # 강한 매도 신호
+        elif sma_20_div >= 5 and daily_pos >= 80:
+            signal = 'STRONG_SELL'
+            strength = -(8 + min(sma_20_div, 7))
+            reason.append(f"강한 매도 (20일선:{sma_20_div:.1f}%, 일봉위치:{daily_pos:.0f}%)")
+        
+        # 일반 매도 신호
+        elif sma_20_div >= 3 or (sma_5min_div >= 2 and daily_pos >= 70):
+            signal = 'SELL'
+            strength = -(5 + min(sma_20_div, 3))
+            reason.append(f"매도 신호 (20일선:{sma_20_div:.1f}%, 5분선:{sma_5min_div:.1f}%)")
+        
+        # 중립
+        elif abs(sma_20_div) <= 1 and 30 <= daily_pos <= 70:
+            signal = 'NEUTRAL'
+            strength = 1
+            reason.append("이격도 중립")
+        
+        return {
+            'signal': signal,
+            'reason': '; '.join(reason) if reason else '보류',
+            'strength': strength,
+            'divergences': divergences
+        }
     
     def _analyze_real_candle_patterns(self, stock_code: str, ohlcv_data: Any) -> Optional[Dict]:
         """실제 OHLCV 데이터에서 캔들패턴 분석
@@ -476,17 +720,46 @@ class MarketScanner:
             logger.debug(f"📊 {stock_code} 캔들패턴 분석 실패로 종목 제외")
             return None
         
-        # 점수 계산 (가중치 적용)
-        volume_score = min(fundamentals['volume_increase_rate'] * 10, 30)  # 최대 30점
-        technical_score = (fundamentals['rsi'] / 100) * 20  # 최대 20점
-        pattern_score = patterns['total_pattern_score'] * 25  # 최대 25점 (패턴당 평균 0.8점 가정)
-        ma_score = 15 if fundamentals['ma_alignment'] else 0  # 15점 또는 0점
-        momentum_score = min(fundamentals['price_change_rate'] * 100, 10)  # 최대 10점
+        # 🆕 이격도 분석 추가 (같은 데이터 재사용)
+        logger.debug(f"📊 {stock_code} 이격도 분석 시작")
+        divergence_analysis = self._get_divergence_analysis(stock_code, ohlcv_data)
+        divergence_signal = self._get_divergence_signal(divergence_analysis) if divergence_analysis else None
         
-        total_score = volume_score + technical_score + pattern_score + ma_score + momentum_score
+        # 점수 계산 (가중치 최적화) - 실전 트레이딩 기준 조정
+        volume_score = min(fundamentals['volume_increase_rate'] * 10, 22)  # 최대 22점 (22%)
+        technical_score = (fundamentals['rsi'] / 100) * 18  # 최대 18점 (18%)
+        pattern_score = patterns['total_pattern_score'] * 18  # 최대 18점 (18%)
+        ma_score = 15 if fundamentals['ma_alignment'] else 0  # 15점 (15%) - 정배열 중요
+        momentum_score = min(fundamentals['price_change_rate'] * 100, 8)  # 최대 8점 (8%)
+        
+        # 🆕 이격도 점수 추가 (최대 15점) - 매수 타이밍에서 가장 중요한 지표
+        divergence_score = 0
+        if divergence_signal:
+            signal_type = divergence_signal.get('signal', 'HOLD')
+            base_score = divergence_signal.get('score', 0)
+            
+            if signal_type == 'BUY':
+                divergence_score = min(base_score * 0.6, 15)  # 과매도 상황에서 최고 점수
+            elif signal_type == 'MOMENTUM':
+                divergence_score = min(base_score * 0.9, 12)  # 상승 모멘텀에서 좋은 점수
+            elif signal_type == 'OVERHEATED':
+                divergence_score = max(base_score, -8)        # 과열 구간에서 강한 감점
+            else:
+                divergence_score = 2  # HOLD도 중립적 가산점 (이격도 정상 = 안정적)
+        
+        total_score = volume_score + technical_score + pattern_score + ma_score + momentum_score + divergence_score
+        
+        # 🆕 디버깅 로그에 이격도 점수 추가
+        divergence_info = ""
+        if divergence_signal and divergence_analysis:
+            divergences = divergence_analysis.get('divergences', {})
+            sma_20_div = divergences.get('sma_20', 0)
+            signal_type = divergence_signal.get('signal', 'HOLD')
+            divergence_info = f"이격도({divergence_score:.1f}, 20일선:{sma_20_div:.1f}%, {signal_type}) + "
         
         logger.debug(f"📊 {stock_code} 점수 계산 완료: 거래량({volume_score:.1f}) + 기술적({technical_score:.1f}) + "
-                    f"패턴({pattern_score:.1f}) + MA({ma_score:.1f}) + 모멘텀({momentum_score:.1f}) = {total_score:.1f}")
+                    f"패턴({pattern_score:.1f}) + MA({ma_score:.1f}) + 모멘텀({momentum_score:.1f}) + "
+                    f"{divergence_info}= {total_score:.1f}")
         
         return min(total_score, 100)  # 최대 100점
     

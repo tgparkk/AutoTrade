@@ -6,7 +6,7 @@ import time
 from enum import Enum
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 from utils.korean_time import now_kst
 
 

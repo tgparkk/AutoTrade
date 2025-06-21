@@ -171,9 +171,9 @@ class RealTimeMonitor:
             target_interval = self.normal_monitoring_interval
         
         # 시장 변동성에 따른 추가 조정
-        high_volatility_detected = self._detect_high_volatility()
-        if high_volatility_detected:
-            target_interval = min(target_interval, self.fast_monitoring_interval)
+        #high_volatility_detected = self._detect_high_volatility()
+        #if high_volatility_detected:
+        #    target_interval = min(target_interval, self.fast_monitoring_interval)
         
         # 모니터링 주기 업데이트
         if self.current_monitoring_interval != target_interval:
@@ -330,16 +330,56 @@ class RealTimeMonitor:
                 spread_rate = (ask_price - bid_price) / bid_price
                 spread_condition = spread_rate <= 0.01  # 1% 이하 스프레드만 허용
             
+            # 🆕 8. 이격도 조건 (핵심 매수 타이밍 지표)
+            divergence_condition = False
+            divergence_info = ""
+            try:
+                # 직접 이격도 계산 (ReferenceData와 RealtimeData 활용)
+                current_price = stock.realtime_data.current_price
+                if current_price > 0 and stock.reference_data.sma_20 > 0:
+                    sma_20_div = (current_price - stock.reference_data.sma_20) / stock.reference_data.sma_20 * 100
+                    
+                    # 당일 고저점 대비 위치 계산
+                    daily_pos = 50  # 기본값
+                    if stock.realtime_data.today_high > 0 and stock.realtime_data.today_low > 0:
+                        day_range = stock.realtime_data.today_high - stock.realtime_data.today_low
+                        if day_range > 0:
+                            daily_pos = (current_price - stock.realtime_data.today_low) / day_range * 100
+                    
+                    # 매수 신호 판단 (시장 단계별 차등 적용)
+                    if market_phase == 'opening':
+                        # 장 초반: 강한 과매도 + 저점 근처
+                        divergence_condition = (sma_20_div <= -3.5 and daily_pos <= 25)
+                    elif market_phase == 'pre_close':
+                        # 마감 전: 매우 보수적 (깊은 과매도)
+                        divergence_condition = (sma_20_div <= -4.0 and daily_pos <= 20)
+                    else:
+                        # 일반 시간: 표준 과매도 조건
+                        divergence_condition = (sma_20_div <= -2.5 and daily_pos <= 35)
+                    
+                    # 디버깅 정보
+                    signal_strength = abs(sma_20_div) if sma_20_div < 0 else 0
+                    divergence_info = f"이격도(20일선:{sma_20_div:.1f}%, 일봉위치:{daily_pos:.0f}%, 강도:{signal_strength:.1f})"
+                    
+                else:
+                    divergence_condition = True  # 데이터 부족시 통과
+                    divergence_info = "이격도(데이터부족)"
+                
+            except Exception as e:
+                logger.debug(f"이격도 조건 확인 실패 {stock.stock_code}: {e}")
+                divergence_condition = True  # 실패시 통과 (다른 조건에 의존)
+                divergence_info = "이격도(계산실패)"
+            
             # 중복 신호 방지
             signal_key = f"{stock.stock_code}_buy"
             duplicate_prevention = signal_key not in self.alert_sent
             
-            # 🔥 최종 매수 신호 판단 (모든 조건 통합)
+            # 🔥 최종 매수 신호 판단 (이격도 조건 추가)
             buy_signal = (volume_condition and price_condition and 
                          volume_min_condition and pattern_condition and
                          strength_condition and buy_ratio_condition and
                          market_pressure_condition and spread_condition and
-                         duplicate_prevention)
+                         divergence_condition and duplicate_prevention)
             #buy_signal =  True
             
             if buy_signal:
@@ -351,7 +391,8 @@ class RealTimeMonitor:
                            f"체결강도({contract_strength:.1f}≥{contract_strength_min:.1f}), "
                            f"매수비율({buy_ratio:.1f}%≥{buy_ratio_min:.1f}%), "
                            f"시장압력({market_pressure}), "
-                           f"패턴점수({stock.total_pattern_score:.1f}≥{min_pattern_score})")
+                           f"패턴점수({stock.total_pattern_score:.1f}≥{min_pattern_score}), "
+                           f"{divergence_info}")
             
             return buy_signal
             
@@ -455,6 +496,34 @@ class RealTimeMonitor:
                 # 손실 상황에서만 적용
                 if current_pnl_rate <= -1.0:
                     return "market_pressure_sell"
+            
+            # 🆕 4-4. 이격도 기반 매도 (과열 구간 감지)
+            try:
+                current_price = stock.realtime_data.current_price
+                if current_price > 0 and stock.reference_data.sma_20 > 0:
+                    sma_20_div = (current_price - stock.reference_data.sma_20) / stock.reference_data.sma_20 * 100
+                    
+                    # 당일 고저점 대비 위치 계산
+                    daily_pos = 50  # 기본값
+                    if stock.realtime_data.today_high > 0 and stock.realtime_data.today_low > 0:
+                        day_range = stock.realtime_data.today_high - stock.realtime_data.today_low
+                        if day_range > 0:
+                            daily_pos = (current_price - stock.realtime_data.today_low) / day_range * 100
+                    
+                    # 과열 구간 매도 조건 (시장 단계별 차등 적용)
+                    overheated_threshold = 5.0 if market_phase == 'normal' else 4.0  # 마감 전/장 초반 더 엄격
+                    high_position_threshold = 80.0 if market_phase == 'normal' else 75.0
+                    
+                    # 강한 과열 신호: 높은 이격도 + 고점 근처 + 수익 상황
+                    if (sma_20_div >= overheated_threshold and daily_pos >= high_position_threshold and current_pnl_rate >= 1.0):
+                        return "divergence_overheated"
+                    
+                    # 중간 과열 신호: 장시간 보유 + 과열 + 소폭 수익
+                    elif (sma_20_div >= 3.0 and daily_pos >= 70.0 and current_pnl_rate >= 0.5 and holding_minutes >= 120):
+                        return "divergence_mild_overheated"
+                        
+            except Exception as e:
+                logger.debug(f"이격도 매도 조건 확인 실패 {stock.stock_code}: {e}")
             
             # === 우선순위 5: 고변동성 기반 매도 ===
             
