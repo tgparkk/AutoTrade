@@ -1,12 +1,19 @@
+#!/usr/bin/env python3
 """
-매매 실행을 전담하는 TradeExecutor 클래스 (장시간 최적화 버전)
+실제 매매 주문 실행을 담당하는 TradeExecutor 클래스
+
+주요 기능:
+- 매수/매도 주문 실행
+- 주문 체결 확인 
+- 리스크 관리 (포지션 크기, 손절/익절)
+- 거래 통계 관리
 """
 
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple, Optional
 from datetime import datetime, timedelta
 from collections import defaultdict
-from models.position import Position, PositionStatus
+from models.stock import Stock, StockStatus
 from utils.korean_time import now_kst
 from utils.logger import setup_logger
 from utils import get_trading_config_loader
@@ -15,45 +22,45 @@ logger = setup_logger(__name__)
 
 
 class TradeExecutor:
-    """매매 실행을 담당하는 클래스 (장시간 최적화 버전)"""
+    """거래 주문 실행 및 관리 클래스"""
     
     def __init__(self):
         """TradeExecutor 초기화"""
+        logger.info("=== TradeExecutor 초기화 시작 ===")
+        
         # 설정 로드
         self.config_loader = get_trading_config_loader()
         self.risk_config = self.config_loader.load_risk_management_config()
         
-        # 통계 정보
+        # 거래 통계
         self.total_trades = 0
         self.winning_trades = 0
         self.losing_trades = 0
         self.total_pnl = 0.0
         
-        # 장시간 최적화를 위한 추가 통계
-        self.execution_times = []  # 주문 실행 시간 추적
-        self.order_success_rate = 0.0
-        self.avg_execution_time = 0.0
+        # 리스크 관리
+        self.max_daily_loss = self.risk_config.get('max_daily_loss', -100000)  # 일일 최대 손실
         self.daily_trade_count = 0
+        
+        # 성능 메트릭
+        self.execution_times = []  # 주문 실행 시간
+        self.avg_execution_time = 0.0
         self.hourly_trades = defaultdict(int)  # 시간대별 거래 수
         
-        # 빠른 실행을 위한 캐시
-        self.last_price_cache = {}  # 최근 가격 캐시
-        self.execution_queue = []   # 실행 대기열
-        
-        # 리스크 관리 최적화
-        self.max_daily_loss = self.risk_config.get('max_daily_loss', -50000)  # 일일 최대 손실
+        # 캐시
+        self.last_price_cache = {}
         self.max_position_size = self.risk_config.get('max_position_size', 1000000)  # 최대 포지션 크기
         self.emergency_stop = False  # 비상 정지 플래그
         
         logger.info("TradeExecutor 초기화 완료 (장시간 최적화 버전)")
     
-    def execute_buy_order(self, position: Position, price: float, 
+    def execute_buy_order(self, stock: Stock, price: float, 
                          quantity: int, order_id: str = None, 
-                         current_positions_count: int = 0) -> bool:
+                         current_positions_count: int) -> bool:
         """매수 주문 실행 (장시간 최적화)
         
         Args:
-            position: 포지션 객체
+            stock: 주식 객체
             price: 매수가
             quantity: 수량
             order_id: 주문번호
@@ -65,8 +72,8 @@ class TradeExecutor:
         start_time = time.time()
         
         try:
-            if not position:
-                logger.error("포지션 객체가 없습니다")
+            if not stock:
+                logger.error("주식 객체가 없습니다")
                 return False
             
             # 비상 정지 체크
@@ -102,19 +109,19 @@ class TradeExecutor:
                 return False
             
             # 매수 정보 설정
-            position.status = PositionStatus.BUY_ORDERED
-            position.buy_price = price
-            position.buy_quantity = quantity
-            position.buy_amount = total_amount
-            position.buy_order_id = order_id or f"BUY_{int(time.time())}"
-            position.order_time = now_kst()
+            stock.status = StockStatus.BUY_ORDERED
+            stock.buy_price = price
+            stock.buy_quantity = quantity
+            stock.buy_amount = total_amount
+            stock.buy_order_id = order_id or f"BUY_{int(time.time())}"
+            stock.order_time = now_kst()
             
             # 손절가, 익절가 설정 (시장 상황에 따른 동적 조정)
             stop_loss_rate = self._get_dynamic_stop_loss_rate()
             take_profit_rate = self._get_dynamic_take_profit_rate()
             
-            position.stop_loss_price = price * (1 + stop_loss_rate)
-            position.target_price = price * (1 + take_profit_rate)
+            stock.stop_loss_price = price * (1 + stop_loss_rate)
+            stock.target_price = price * (1 + take_profit_rate)
             
             # 실행 시간 기록
             execution_time = time.time() - start_time
@@ -125,14 +132,14 @@ class TradeExecutor:
             current_hour = now_kst().hour
             self.hourly_trades[current_hour] += 1
             
-            logger.info(f"✅ 매수 주문 실행: {position.stock_code} {quantity}주 @{price:,}원 "
-                       f"(손절: {position.stop_loss_price:,.0f}, 익절: {position.target_price:,.0f}) "
+            logger.info(f"✅ 매수 주문 실행: {stock.stock_code} {quantity}주 @{price:,}원 "
+                       f"(손절: {stock.stop_loss_price:,.0f}, 익절: {stock.target_price:,.0f}) "
                        f"실행시간: {execution_time:.3f}초")
             
             return True
             
         except Exception as e:
-            logger.error(f"매수 주문 실행 오류 {position.stock_code}: {e}")
+            logger.error(f"매수 주문 실행 오류 {stock.stock_code}: {e}")
             return False
     
     def _get_dynamic_stop_loss_rate(self) -> float:
@@ -196,247 +203,244 @@ class TradeExecutor:
             if len(self.execution_times) > 100:
                 self.execution_times = self.execution_times[-100:]
     
-    def confirm_buy_execution(self, position: Position, executed_price: float = None) -> bool:
+    def confirm_buy_execution(self, stock: Stock, executed_price: float = None) -> bool:
         """매수 체결 확인 (장시간 최적화)
         
         Args:
-            position: 포지션 객체
+            stock: 주식 객체
             executed_price: 체결가 (None이면 주문가 사용)
             
         Returns:
             확인 성공 여부
         """
         try:
-            if not position or position.status != PositionStatus.BUY_ORDERED:
+            if not stock or stock.status != StockStatus.BUY_ORDERED:
                 return False
             
-            if executed_price and executed_price != position.buy_price:
+            if executed_price and executed_price != stock.buy_price:
                 # 체결가가 다르면 손절가, 익절가 재계산
-                price_diff_rate = (executed_price - position.buy_price) / position.buy_price
-                logger.info(f"체결가 차이: {price_diff_rate:+.2%} ({position.buy_price:,} → {executed_price:,})")
+                price_diff_rate = (executed_price - stock.buy_price) / stock.buy_price
+                logger.info(f"체결가 차이: {price_diff_rate:+.2%} ({stock.buy_price:,} → {executed_price:,})")
                 
-                position.buy_price = executed_price
-                position.buy_amount = executed_price * position.buy_quantity
+                stock.buy_price = executed_price
+                stock.buy_amount = executed_price * stock.buy_quantity
                 
                 # 손절가, 익절가 재계산
                 stop_loss_rate = self._get_dynamic_stop_loss_rate()
                 take_profit_rate = self._get_dynamic_take_profit_rate()
-                position.stop_loss_price = executed_price * (1 + stop_loss_rate)
-                position.target_price = executed_price * (1 + take_profit_rate)
+                stock.stop_loss_price = executed_price * (1 + stop_loss_rate)
+                stock.target_price = executed_price * (1 + take_profit_rate)
             
-            position.status = PositionStatus.BOUGHT
-            position.execution_time = now_kst()
+            stock.status = StockStatus.BOUGHT
+            stock.execution_time = now_kst()
             
             # 가격 캐시 업데이트
-            self.last_price_cache[position.stock_code] = position.buy_price
+            self.last_price_cache[stock.stock_code] = stock.buy_price
             
             # 일일 거래 수 증가
             self.daily_trade_count += 1
             
-            logger.info(f"✅ 매수 체결 확인: {position.stock_code} {position.buy_quantity}주 @{position.buy_price:,}원")
+            logger.info(f"✅ 매수 체결 확인: {stock.stock_code} {stock.buy_quantity}주 @{stock.buy_price:,}원")
             return True
             
         except Exception as e:
-            logger.error(f"매수 체결 확인 오류 {position.stock_code}: {e}")
+            logger.error(f"매수 체결 확인 오류 {stock.stock_code}: {e}")
             return False
     
-    def execute_sell_order(self, position: Position, price: float = None, 
+    def execute_sell_order(self, stock: Stock, price: float = None, 
                           reason: str = "manual", order_id: str = None) -> bool:
         """매도 주문 실행 (장시간 최적화)
         
         Args:
-            position: 포지션 객체
-            price: 매도가 (None이면 시장가)
+            stock: 주식 객체
+            price: 매도가 (None이면 마지막 알려진 가격 사용)
             reason: 매도 사유
             order_id: 주문번호
             
         Returns:
             실행 성공 여부
         """
-        start_time = time.time()
-        
         try:
-            if not position or position.status != PositionStatus.BOUGHT:
-                logger.warning(f"매도 불가 상태: {position.stock_code if position else 'None'}")
+            if not stock or stock.status != StockStatus.BOUGHT:
+                logger.warning(f"매도 불가 상태: {stock.stock_code if stock else 'None'}")
                 return False
             
-            # 매도가 설정 (None이면 현재 캐시된 가격 사용)
+            # 가격이 없으면 캐시에서 조회
             if price is None:
-                price = self.last_price_cache.get(position.stock_code, position.buy_price)
+                price = self.last_price_cache.get(stock.stock_code, stock.buy_price)
             
-            position.status = PositionStatus.SELL_ORDERED
-            position.sell_order_id = order_id or f"SELL_{int(time.time())}"
-            position.sell_order_time = now_kst()
-            position.sell_reason = reason
+            stock.status = StockStatus.SELL_ORDERED
+            stock.sell_order_id = order_id or f"SELL_{int(time.time())}"
+            stock.sell_order_time = now_kst()
+            stock.sell_reason = reason
             
-            # 실행 시간 기록
-            execution_time = time.time() - start_time
-            self.execution_times.append(execution_time)
-            self._update_execution_stats()
+            # 시간대별 거래 수 증가
+            current_hour = now_kst().hour
+            self.hourly_trades[current_hour] += 1
             
-            logger.info(f"✅ 매도 주문 실행: {position.stock_code} @{price:,}원 (사유: {reason}) "
-                       f"실행시간: {execution_time:.3f}초")
+            logger.info(f"✅ 매도 주문 실행: {stock.stock_code} @{price:,}원 (사유: {reason}) "
+                       f"매수가: {stock.buy_price:,}원")
             return True
             
         except Exception as e:
-            logger.error(f"매도 주문 실행 오류 {position.stock_code}: {e}")
+            logger.error(f"매도 주문 실행 오류 {stock.stock_code}: {e}")
             return False
     
-    def confirm_sell_execution(self, position: Position, executed_price: float) -> bool:
+    def confirm_sell_execution(self, stock: Stock, executed_price: float) -> bool:
         """매도 체결 확인 (장시간 최적화)
         
         Args:
-            position: 포지션 객체
+            stock: 주식 객체
             executed_price: 체결가
             
         Returns:
             확인 성공 여부
         """
         try:
-            if not position or position.status != PositionStatus.SELL_ORDERED:
+            if not stock or stock.status != StockStatus.SELL_ORDERED:
                 return False
             
-            # 실현 손익 계산
-            if position.buy_price and position.buy_quantity:
-                total_buy = position.buy_price * position.buy_quantity
-                total_sell = executed_price * position.buy_quantity
-                position.realized_pnl = total_sell - total_buy
-                position.realized_pnl_rate = (executed_price - position.buy_price) / position.buy_price * 100
+            # 손익 계산
+            if stock.buy_price and stock.buy_quantity:
+                total_buy = stock.buy_price * stock.buy_quantity
+                total_sell = executed_price * stock.buy_quantity
+                stock.realized_pnl = total_sell - total_buy
+                stock.realized_pnl_rate = (executed_price - stock.buy_price) / stock.buy_price * 100
                 
-                # 수수료 고려 (간단 계산)
-                commission_rate = 0.0015  # 0.15%
+                # 수수료 반영 (간단히 0.3%)
+                commission_rate = 0.003
                 total_commission = (total_buy + total_sell) * commission_rate
-                position.realized_pnl -= total_commission
+                stock.realized_pnl -= total_commission
             
-            position.status = PositionStatus.SOLD
-            position.sell_execution_time = now_kst()
-            position.sell_price = executed_price
+            stock.status = StockStatus.SOLD
+            stock.sell_execution_time = now_kst()
+            stock.sell_price = executed_price
             
             # 통계 업데이트
             self.total_trades += 1
-            self.total_pnl += position.realized_pnl or 0
+            self.total_pnl += stock.realized_pnl or 0
             
-            if position.realized_pnl and position.realized_pnl > 0:
+            if stock.realized_pnl and stock.realized_pnl > 0:
                 self.winning_trades += 1
             else:
                 self.losing_trades += 1
             
-            # 승률 업데이트
-            self.order_success_rate = self.winning_trades / self.total_trades if self.total_trades > 0 else 0
+            # 일일 거래 수 증가
+            self.daily_trade_count += 1
             
             # 가격 캐시 업데이트
-            self.last_price_cache[position.stock_code] = executed_price
+            self.last_price_cache[stock.stock_code] = executed_price
             
-            # 비상 정지 해제 조건 확인
-            if self.emergency_stop and self.total_pnl > self.max_daily_loss * 0.8:
-                self.emergency_stop = False
-                logger.info("비상 정지 해제")
+            # 연속 손실 체크 (비상 정지 조건)
+            if self.losing_trades >= 3 and self.winning_trades == 0:
+                logger.warning("연속 손실 발생 - 비상 정지 활성화")
+                self.emergency_stop = True
             
-            logger.info(f"✅ 매도 체결 확인: {position.stock_code} "
-                       f"손익: {position.realized_pnl:+,.0f}원 ({position.realized_pnl_rate:+.2f}%) "
-                       f"사유: {position.sell_reason}")
+            logger.info(f"✅ 매도 체결 확인: {stock.stock_code} "
+                       f"손익: {stock.realized_pnl:+,.0f}원 ({stock.realized_pnl_rate:+.2f}%) "
+                       f"사유: {stock.sell_reason}")
             
             return True
             
         except Exception as e:
-            logger.error(f"매도 체결 확인 오류 {position.stock_code}: {e}")
+            logger.error(f"매도 체결 확인 오류 {stock.stock_code}: {e}")
             return False
     
-    def get_positions_to_sell(self, positions: List[Position], current_prices: Dict[str, float] = None) -> List[Tuple[Position, str]]:
-        """매도해야 할 포지션들과 사유 반환 (장시간 최적화)
+    def get_positions_to_sell(self, stocks: List[Stock], 
+                             current_prices: Dict[str, float] = None) -> List[Tuple[Stock, str]]:
+        """매도할 포지션들을 선별 (장시간 최적화)
         
         Args:
-            positions: 보유 포지션 리스트
-            current_prices: 현재 가격 딕셔너리 (종목코드: 가격)
+            stocks: 보유 주식 리스트
+            current_prices: 현재가 딕셔너리 {종목코드: 가격}
             
         Returns:
-            (Position, 사유) 튜플 리스트
+            매도할 (주식, 사유) 튜플 리스트
         """
-        to_sell = []
+        positions_to_sell = []
+        current_time = now_kst()
         
-        try:
-            for position in positions:
-                if position.status != PositionStatus.BOUGHT:
-                    continue
-                
-                # 현재 가격 결정 (우선순위: 파라미터 > 캐시 > 포지션 종가)
-                current_price = position.close_price
-                if current_prices and position.stock_code in current_prices:
-                    current_price = current_prices[position.stock_code]
-                elif position.stock_code in self.last_price_cache:
-                    current_price = self.last_price_cache[position.stock_code]
-                
-                # 기본 매도 조건들
-                if position.should_stop_loss(current_price):
-                    to_sell.append((position, "stop_loss"))
-                    continue
-                
-                if position.should_take_profit(current_price):
-                    to_sell.append((position, "take_profit"))
-                    continue
-                
-                if position.is_holding_period_exceeded():
-                    to_sell.append((position, "holding_period"))
-                    continue
-                
-                # 장시간 최적화 추가 조건들
-                
-                # 1. 급락 감지 매도
-                if self._detect_sudden_drop(position, current_price):
-                    to_sell.append((position, "sudden_drop"))
-                    continue
-                
-                # 2. 시간 기반 매도 (마감 전)
-                current_time = now_kst()
-                if current_time.hour >= 14 and current_time.minute >= 50:
-                    # 14:50 이후에는 수익이 있으면 매도
-                    if position.get_unrealized_pnl(current_price) > 0:
-                        to_sell.append((position, "pre_close_profit"))
-                        continue
-                
-                # 3. 비상 정지 상황에서는 모든 포지션 매도
-                if self.emergency_stop:
-                    to_sell.append((position, "emergency_stop"))
-                    continue
+        for stock in stocks:
+            if stock.status != StockStatus.BOUGHT:
+                continue
             
-            return to_sell
+            # 현재가 확인
+            if current_prices and stock.stock_code in current_prices:
+                current_price = current_prices[stock.stock_code]
+                # 실시간 데이터 업데이트
+                stock.update_realtime_data(current_price=current_price)
+            else:
+                current_price = stock.realtime_data.current_price
             
-        except Exception as e:
-            logger.error(f"매도 대상 포지션 검색 오류: {e}")
-            return []
+            if current_price <= 0:
+                continue
+            
+            # 손익 계산
+            stock.calculate_unrealized_pnl(current_price)
+            
+            # 매도 조건 체크
+            sell_reason = None
+            
+            # 1. 익절 조건
+            if stock.should_take_profit(current_price):
+                sell_reason = "익절"
+            
+            # 2. 손절 조건
+            elif stock.should_stop_loss(current_price):
+                sell_reason = "손절"
+            
+            # 3. 보유기간 초과
+            elif stock.is_holding_period_exceeded():
+                sell_reason = "보유기간초과"
+            
+            # 4. 급락 감지
+            elif self._detect_sudden_drop(stock, current_price):
+                sell_reason = "급락감지"
+            
+            # 5. 장마감 30분 전 강제 매도 (15:00 이후)
+            elif current_time.hour >= 15:
+                if stock.unrealized_pnl and stock.unrealized_pnl > 0:
+                    sell_reason = "장마감전익절"
+                elif stock.unrealized_pnl and stock.unrealized_pnl < -50000:  # 5만원 이상 손실
+                    sell_reason = "장마감전손절"
+            
+            if sell_reason:
+                positions_to_sell.append((stock, sell_reason))
+        
+        return positions_to_sell
     
-    def _detect_sudden_drop(self, position: Position, current_price: float) -> bool:
-        """급락 감지
+    def _detect_sudden_drop(self, stock: Stock, current_price: float) -> bool:
+        """급락 감지 (단순 버전)
         
         Args:
-            position: 포지션
-            current_price: 현재 가격
+            stock: 주식 객체
+            current_price: 현재가
             
         Returns:
             급락 여부
         """
-        try:
-            # 매수가 대비 급락률 체크
-            drop_rate = (position.buy_price - current_price) / position.buy_price
-            
-            # 5분 이내에 3% 이상 급락하면 손절
-            if drop_rate >= 0.03:
-                holding_minutes = (now_kst() - position.execution_time).total_seconds() / 60
-                if holding_minutes <= 5:
-                    return True
-            
+        if not stock.buy_price:
             return False
-            
-        except Exception as e:
-            logger.error(f"급락 감지 오류 {position.stock_code}: {e}")
-            return False
+        
+        # 5분 내 5% 이상 하락
+        drop_rate = (current_price - stock.buy_price) / stock.buy_price
+        
+        if drop_rate <= -0.05:  # 5% 이상 하락
+            # 추가로 거래량 급증도 확인할 수 있음
+            volume_spike = stock.realtime_data.volume_spike_ratio
+            if volume_spike > 3.0:  # 평소 거래량의 3배 이상
+                logger.warning(f"급락 감지: {stock.stock_code} {drop_rate:.2%} 하락, 거래량 {volume_spike:.1f}배")
+                return True
+        
+        return False
     
     def get_trade_statistics(self) -> Dict:
-        """거래 통계 정보 반환 (장시간 최적화)"""
-        win_rate = (self.winning_trades / self.total_trades * 100) if self.total_trades > 0 else 0
+        """거래 통계 조회
         
-        # 시간대별 거래 분석
-        most_active_hour = max(self.hourly_trades.items(), key=lambda x: x[1]) if self.hourly_trades else (0, 0)
+        Returns:
+            거래 통계 딕셔너리
+        """
+        win_rate = (self.winning_trades / max(self.total_trades, 1)) * 100
         
         return {
             'total_trades': self.total_trades,
@@ -444,45 +448,36 @@ class TradeExecutor:
             'losing_trades': self.losing_trades,
             'win_rate': win_rate,
             'total_pnl': self.total_pnl,
-            'avg_pnl_per_trade': self.total_pnl / max(self.total_trades, 1),
-            'daily_trade_count': self.daily_trade_count,
+            'total_realized_pnl': self.total_pnl,  # 호환성
             'avg_execution_time': self.avg_execution_time,
-            'order_success_rate': self.order_success_rate,
-            'emergency_stop': self.emergency_stop,
-            'most_active_hour': most_active_hour[0],
-            'most_active_hour_count': most_active_hour[1],
-            'hourly_distribution': dict(self.hourly_trades)
+            'daily_trade_count': self.daily_trade_count,
+            'emergency_stop': self.emergency_stop
         }
     
     def reset_statistics(self):
-        """통계 초기화 (장시간 최적화)"""
-        self.total_trades = 0
-        self.winning_trades = 0
-        self.losing_trades = 0
-        self.total_pnl = 0.0
+        """통계 초기화 (일일 리셋)"""
+        logger.info("거래 통계 초기화")
         self.daily_trade_count = 0
-        self.execution_times.clear()
-        self.hourly_trades.clear()
-        self.last_price_cache.clear()
-        self.execution_queue.clear()
         self.emergency_stop = False
-        self.order_success_rate = 0.0
-        self.avg_execution_time = 0.0
+        self.hourly_trades.clear()
         
-        logger.info("거래 통계 초기화 완료")
+        # 전체 통계는 유지 (누적)
+        # self.total_trades = 0
+        # self.winning_trades = 0
+        # self.losing_trades = 0
+        # self.total_pnl = 0.0
     
     def get_performance_summary(self) -> str:
-        """성능 요약 문자열 반환"""
-        stats = self.get_trade_statistics()
+        """성과 요약 문자열 생성
         
+        Returns:
+            성과 요약 문자열
+        """
+        stats = self.get_trade_statistics()
         return (f"거래 성과: {stats['total_trades']}건 "
-                f"(승률: {stats['win_rate']:.1f}%, "
-                f"손익: {stats['total_pnl']:+,.0f}원, "
-                f"평균실행: {stats['avg_execution_time']:.3f}초)")
+                f"(승률 {stats['win_rate']:.1f}%, "
+                f"손익 {stats['total_pnl']:+,.0f}원)")
     
     def __str__(self) -> str:
         """문자열 표현"""
-        return (f"TradeExecutor(거래: {self.total_trades}건, "
-                f"승률: {self.winning_trades/max(self.total_trades,1)*100:.1f}%, "
-                f"손익: {self.total_pnl:+,.0f}원, "
-                f"비상정지: {self.emergency_stop})") 
+        return f"TradeExecutor(거래수: {self.total_trades}, 손익: {self.total_pnl:+,.0f}원)" 

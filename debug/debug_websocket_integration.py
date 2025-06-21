@@ -1,201 +1,225 @@
 #!/usr/bin/env python3
 """
-디버그: TradeManager에서 웹소켓 매니저 통합 테스트
+StockManager와 WebSocket 시스템 연동 테스트
 """
-
 import sys
 import os
-import asyncio
-import time
-
-# 프로젝트 루트를 Python 경로에 추가
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from trade.trade_manager import TradeManager
-from utils.korean_time import now_kst
+import asyncio
+import time
+from datetime import datetime
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
-
-async def debug_websocket_integration():
-    """TradeManager에서 웹소켓 통합 테스트"""
-    print("=" * 70)
-    print("🌐 TradeManager 웹소켓 통합 테스트")
-    print("=" * 70)
+class WebSocketIntegrationTest:
+    """StockManager와 WebSocket 연동 테스트"""
     
-    try:
-        # TradeManager 초기화
-        logger.info("TradeManager 초기화 중...")
-        trade_manager = TradeManager()
-        logger.info("✅ TradeManager 초기화 완료")
+    def __init__(self):
+        # 실행 시점에서 import하여 순환 import 문제 회피
+        try:
+            from trade.stock_manager import StockManager
+            self.stock_manager = StockManager()
+            logger.info("✅ StockManager 초기화 완료")
+        except Exception as e:
+            logger.error(f"❌ StockManager 초기화 실패: {e}")
+            self.stock_manager = None
         
-        print(f"\n📊 초기 상태:")
-        print(f"   - TradeManager: {trade_manager}")
+        try:
+            from websocket.kis_websocket_manager import KISWebSocketManager
+            self.websocket_manager = KISWebSocketManager()
+            logger.info("✅ KISWebSocketManager 초기화 완료")
+        except Exception as e:
+            logger.error(f"❌ KISWebSocketManager 초기화 실패: {e}")
+            self.websocket_manager = None
         
-        if trade_manager.websocket_manager:
-            print(f"   - 웹소켓 연결: {'✅ 연결' if trade_manager.websocket_manager.is_connected else '❌ 미연결'}")
-            print(f"   - 웹소켓 구독: {len(trade_manager.websocket_manager.get_subscribed_stocks())}개")
-        else:
-            print(f"   - 웹소켓: ❌ 비활성화 (import 실패)")
-            print(f"⚠️ 웹소켓 매니저가 None입니다. 모니터링 시작이 제한됩니다.")
-            return False
+    def test_callback_registration(self):
+        """콜백 등록 테스트"""
+        logger.info("=== 콜백 등록 테스트 시작 ===")
+        
+        if not self.stock_manager or not self.websocket_manager:
+            logger.error("❌ 매니저 초기화 실패로 테스트 건너뜀")
+            return
+        
+        # StockManager 콜백 등록
+        self.stock_manager.setup_websocket_callbacks(self.websocket_manager)
+        
+        # 등록된 콜백 확인
+        status = self.websocket_manager.get_status()
+        subscription_status = status.get('subscriptions', {})
+        tr_id_callbacks = subscription_status.get('tr_id_callback_counts', {})
+        
+        logger.info(f"등록된 TR_ID 콜백 수: {tr_id_callbacks}")
+        
+        # 예상되는 콜백들이 등록되었는지 확인
+        expected_tr_ids = ['H0STCNT0', 'H0STASP0', 'H0STCNI0']
+        for tr_id in expected_tr_ids:
+            count = tr_id_callbacks.get(tr_id, 0)
+            if count > 0:
+                logger.info(f"✅ {tr_id} 콜백 등록됨: {count}개")
+            else:
+                logger.warning(f"❌ {tr_id} 콜백 등록 안됨")
+        
+        logger.info("=== 콜백 등록 테스트 완료 ===\n")
+        
+    def test_stock_data_flow(self):
+        """종목 데이터 플로우 테스트"""
+        logger.info("=== 종목 데이터 플로우 테스트 시작 ===")
+        
+        if not self.stock_manager:
+            logger.error("❌ StockManager가 없어 테스트 건너뜀")
+            return
         
         # 테스트 종목 추가
-        print(f"\n📈 테스트 종목 추가")
-        test_stocks = [
-            ("005930", "삼성전자"),
-            ("000660", "SK하이닉스"),
-            ("035420", "NAVER")
-        ]
-        
-        for stock_code, stock_name in test_stocks:
-            success = trade_manager.stock_manager.add_selected_stock(
-                stock_code=stock_code,
-                stock_name=stock_name,
-                open_price=75000,
-                high_price=76000,
-                low_price=74000,
-                close_price=75500,
-                volume=1000000,
-                selection_score=85.0
-            )
-            if success:
-                print(f"   ✅ {stock_code}[{stock_name}] 추가 완료")
-        
-        # 모니터링 시작 (웹소켓 연결 및 구독 포함)
-        print(f"\n🚀 실시간 모니터링 시작 (웹소켓 통합)")
-        print("-" * 50)
-        
-        # 브레이크포인트 설정 위치 (모니터링 시작 전)
-        # breakpoint()
-        
-        monitor_success = trade_manager.start_market_monitoring()
-        
-        if monitor_success:
-            print(f"✅ 모니터링 시작 성공")
-            
-            # 웹소켓 상태 확인
-            websocket_manager = trade_manager.get_websocket_manager()
-            print(f"\n🌐 웹소켓 상태:")
-            print(f"   - 연결 상태: {'✅ 연결' if websocket_manager.is_connected else '❌ 미연결'}")
-            print(f"   - 실행 상태: {'✅ 실행' if websocket_manager.is_running else '❌ 중지'}")
-            print(f"   - 구독 종목: {len(websocket_manager.get_subscribed_stocks())}개")
-            
-            if websocket_manager.get_subscribed_stocks():
-                print(f"   - 구독 목록: {list(websocket_manager.get_subscribed_stocks())}")
-            
-            # 웹소켓 상태 모니터링 (30초)
-            print(f"\n📡 웹소켓 상태 모니터링 (30초)")
-            print("-" * 50)
-            
-            start_time = time.time()
-            while time.time() - start_time < 30:
-                await asyncio.sleep(5)
-                
-                # 5초마다 상태 체크
-                current_time = now_kst()
-                status = websocket_manager.get_status()
-                
-                print(f"⏰ {current_time.strftime('%H:%M:%S')} - "
-                      f"연결: {'✅' if status.get('is_connected', False) else '❌'}, "
-                      f"구독: {status.get('subscription_count', 0)}개, "
-                      f"메시지: {status.get('total_messages', 0)}개")
-            
-            print(f"\n✅ 웹소켓 모니터링 완료")
-            
-        else:
-            print(f"❌ 모니터링 시작 실패")
-        
-        # 모니터링 중지 (웹소켓 정리 포함)
-        print(f"\n🛑 모니터링 중지")
-        trade_manager.stop_market_monitoring()
-        
-        # 최종 상태 확인
-        print(f"\n📊 최종 웹소켓 상태:")
-        if trade_manager.websocket_manager:
-            final_status = trade_manager.websocket_manager.get_status()
-            print(f"   - 연결: {'✅' if final_status.get('is_connected', False) else '❌'}")
-            print(f"   - 구독: {final_status.get('subscription_count', 0)}개")
-            print(f"   - 총 메시지: {final_status.get('total_messages', 0)}개")
-            print(f"   - 연결 횟수: {final_status.get('connection_count', 0)}회")
-        else:
-            print(f"   - 웹소켓: ❌ 비활성화")
-        
-        return True
-        
-    except Exception as e:
-        logger.error(f"웹소켓 통합 테스트 중 오류: {e}")
-        print(f"❌ 테스트 실패: {e}")
-        return False
-
-
-def debug_websocket_manager_only():
-    """웹소켓 매니저 단독 테스트"""
-    print(f"\n🔧 웹소켓 매니저 단독 테스트")
-    print("-" * 40)
-    
-    try:
-        # 직접 웹소켓 매니저 생성
-        from websocket.kis_websocket_manager import KISWebSocketManager
-        
-        websocket_manager = KISWebSocketManager()
-        print(f"✅ 웹소켓 매니저 생성 완료")
-        print(f"   - 초기 상태: {'연결' if websocket_manager.is_connected else '미연결'}")
-        
-        # 연결 테스트
-        print(f"🔌 웹소켓 연결 테스트...")
-        if websocket_manager.connect():
-            print(f"✅ 웹소켓 연결 성공")
-            
-            # 간단한 구독 테스트
-            print(f"📡 구독 테스트...")
-            if websocket_manager.subscribe_stock_sync("005930"):
-                print(f"✅ 삼성전자 구독 성공")
-            else:
-                print(f"❌ 삼성전자 구독 실패")
-            
-            time.sleep(3)  # 3초 대기
-            
-            # 상태 확인
-            status = websocket_manager.get_status()
-            print(f"📊 웹소켓 상태: {status}")
-            
-            # 정리
-            websocket_manager.safe_cleanup()
-            print(f"✅ 웹소켓 정리 완료")
-        else:
-            print(f"❌ 웹소켓 연결 실패")
-            
-    except Exception as e:
-        print(f"❌ 웹소켓 단독 테스트 실패: {e}")
-
-
-async def main():
-    """메인 함수"""
-    print("🌐 TradeManager 웹소켓 통합 테스트를 시작합니다...")
-    
-    try:
-        # 웹소켓 매니저 단독 테스트
-        debug_websocket_manager_only()
-        
-        print("\n" + "=" * 70)
-        
-        # 통합 테스트
-        success = await debug_websocket_integration()
+        test_stock = "005930"  # 삼성전자
+        success = self.stock_manager.add_selected_stock(
+            stock_code=test_stock,
+            stock_name="삼성전자",
+            open_price=73000,
+            high_price=74000,
+            low_price=72000,
+            close_price=73500,
+            volume=1000000,
+            selection_score=85.5
+        )
         
         if success:
-            print("\n✅ 모든 웹소켓 통합 테스트 완료")
-        else:
-            print("\n❌ 웹소켓 통합 테스트 실패")
-            sys.exit(1)
+            logger.info(f"✅ 테스트 종목 추가 성공: {test_stock}")
             
-    except KeyboardInterrupt:
-        print("\n👋 테스트를 중단합니다.")
-    except Exception as e:
-        print(f"\n❌ 테스트 오류: {e}")
-        sys.exit(1)
+            # 종목 상태 확인
+            stock = self.stock_manager.get_selected_stock(test_stock)
+            if stock:
+                logger.info(f"종목 정보: {stock.stock_name} - {stock.realtime_data.current_price:,}원")
+                logger.info(f"종목 상태: {stock.status.value}")
+            else:
+                logger.warning("❌ 종목 조회 실패")
+        else:
+            logger.warning("❌ 테스트 종목 추가 실패")
+        
+        logger.info("=== 종목 데이터 플로우 테스트 완료 ===\n")
+        
+    def test_callback_simulation(self):
+        """콜백 시뮬레이션 테스트"""
+        logger.info("=== 콜백 시뮬레이션 테스트 시작 ===")
+        
+        if not self.stock_manager:
+            logger.error("❌ StockManager가 없어 테스트 건너뜀")
+            return
+        
+        # 테스트 종목이 있는지 확인
+        test_stock = "005930"
+        if test_stock not in self.stock_manager.stock_metadata:
+            logger.warning("테스트 종목이 없어 시뮬레이션을 건너뜁니다")
+            return
+        
+        # 가격 데이터 시뮬레이션
+        price_data = {
+            'stock_code': test_stock,
+            'stck_prpr': '74000',  # 현재가
+            'acml_vol': '1500000',  # 누적거래량
+            'prdy_vrss': '500',     # 전일대비
+        }
+        
+        logger.info("실시간 가격 콜백 시뮬레이션...")
+        self.stock_manager.handle_realtime_price('H0STCNT0', test_stock, price_data)
+        
+        # 업데이트된 데이터 확인
+        updated_stock = self.stock_manager.get_selected_stock(test_stock)
+        if updated_stock:
+            logger.info(f"업데이트된 가격: {updated_stock.realtime_data.current_price:,}원")
+        
+        # 호가 데이터 시뮬레이션
+        orderbook_data = {
+            'stock_code': test_stock,
+            'bidp1': '73900',  # 매수1호가
+            'askp1': '74100',  # 매도1호가
+            'bidp_rsqn1': '100',  # 매수1호가잔량
+            'askp_rsqn1': '200',  # 매도1호가잔량
+        }
+        
+        logger.info("실시간 호가 콜백 시뮬레이션...")
+        self.stock_manager.handle_realtime_orderbook('H0STASP0', test_stock, orderbook_data)
+        
+        # 체결통보 시뮬레이션
+        execution_data = {
+            'data': {
+                'mksc_shrn_iscd': test_stock,
+                'exec_prce': '74000',
+                'exec_qty': '100',
+                'ord_gno_brno': 'BUY'
+            }
+        }
+        
+        logger.info("체결통보 콜백 시뮬레이션...")
+        self.stock_manager.handle_execution_notice('H0STCNI0', execution_data)
+        
+        logger.info("=== 콜백 시뮬레이션 테스트 완료 ===\n")
+        
+    def test_subscription_manager_status(self):
+        """구독 관리자 상태 테스트"""
+        logger.info("=== 구독 관리자 상태 테스트 시작 ===")
+        
+        if not self.websocket_manager:
+            logger.error("❌ WebSocketManager가 없어 테스트 건너뜀")
+            return
+        
+        # 구독 관리자 상태 조회
+        subscription_manager = self.websocket_manager.subscription_manager
+        status = subscription_manager.get_status()
+        
+        logger.info(f"최대 구독 가능 종목 수: {status['max_stocks']}")
+        logger.info(f"현재 구독 종목 수: {status['subscribed_count']}")
+        logger.info(f"웹소켓 사용량: {status['websocket_usage']}")
+        
+        # 콜백 등록 현황
+        tr_id_counts = status.get('tr_id_callback_counts', {})
+        logger.info("TR_ID별 콜백 등록 현황:")
+        for tr_id, count in tr_id_counts.items():
+            logger.info(f"  {tr_id}: {count}개")
+        
+        global_counts = status.get('global_callback_counts', {})
+        logger.info("데이터 타입별 글로벌 콜백 등록 현황:")
+        for data_type, count in global_counts.items():
+            logger.info(f"  {data_type}: {count}개")
+        
+        logger.info("=== 구독 관리자 상태 테스트 완료 ===\n")
+        
+    def run_all_tests(self):
+        """모든 테스트 실행"""
+        logger.info("🚀 StockManager-WebSocket 연동 테스트 시작")
+        logger.info("=" * 60)
+        
+        try:
+            # 1. 콜백 등록 테스트
+            self.test_callback_registration()
+            
+            # 2. 종목 데이터 플로우 테스트
+            self.test_stock_data_flow()
+            
+            # 3. 콜백 시뮬레이션 테스트
+            self.test_callback_simulation()
+            
+            # 4. 구독 관리자 상태 테스트
+            self.test_subscription_manager_status()
+            
+            logger.info("✅ 모든 테스트 완료!")
+            
+        except Exception as e:
+            logger.error(f"❌ 테스트 중 오류 발생: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        finally:
+            # 정리
+            if self.stock_manager:
+                self.stock_manager.clear_all_stocks()
+                logger.info("🧹 테스트 환경 정리 완료")
 
+def main():
+    """메인 함수"""
+    test = WebSocketIntegrationTest()
+    test.run_all_tests()
 
 if __name__ == "__main__":
-    asyncio.run(main()) 
+    main() 

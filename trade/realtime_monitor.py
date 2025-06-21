@@ -8,7 +8,7 @@ import threading
 from typing import Dict, List, Optional, Set
 from datetime import datetime, time as dt_time
 from collections import defaultdict, deque
-from models.position import Position, PositionStatus
+from models.stock import Stock, StockStatus
 from .stock_manager import StockManager
 from .trade_executor import TradeExecutor
 from utils.korean_time import now_kst
@@ -31,6 +31,9 @@ class RealTimeMonitor:
         """
         self.stock_manager = stock_manager
         self.trade_executor = trade_executor
+        
+        # StockManager에 자신의 참조 설정 (체결통보 통계 업데이트용)
+        self.stock_manager.set_realtime_monitor_ref(self)
         
         # 설정 로드
         self.config_loader = get_trading_config_loader()
@@ -59,6 +62,12 @@ class RealTimeMonitor:
         self.buy_signals_detected = 0
         self.sell_signals_detected = 0
         self.orders_executed = 0
+        
+        # 세분화된 주문 통계
+        self.buy_orders_submitted = 0    # 매수 주문 접수 수
+        self.sell_orders_submitted = 0   # 매도 주문 접수 수
+        self.buy_orders_executed = 0     # 매수 체결 수 (웹소켓에서 업데이트)
+        self.sell_orders_executed = 0    # 매도 체결 수 (웹소켓에서 업데이트)
         
         # 시장 시간 설정
         self.market_open_time = dt_time(9, 0)   # 09:00
@@ -174,9 +183,10 @@ class RealTimeMonitor:
             high_volatility_count = 0
             
             for position in positions:
-                if position.status in [PositionStatus.BOUGHT, PositionStatus.WATCHING]:
+                if position.status in [StockStatus.BOUGHT, StockStatus.WATCHING]:
                     current_price = self.price_cache.get(position.stock_code, position.close_price)
-                    price_change_rate = abs((current_price - position.open_price) / position.open_price)
+                    # close_price를 기준가로 사용 (open_price 속성이 없으므로)
+                    price_change_rate = abs((current_price - position.close_price) / position.close_price)
                     
                     if price_change_rate >= self.market_volatility_threshold:
                         high_volatility_count += 1
@@ -295,7 +305,7 @@ class RealTimeMonitor:
         
         return recent_avg / previous_avg if previous_avg > 0 else 1.0
     
-    def analyze_buy_conditions(self, position: Position, realtime_data: Dict) -> bool:
+    def analyze_buy_conditions(self, stock: Stock, realtime_data: Dict) -> bool:
         """매수 조건 분석 (장시간 최적화)
         
         Args:
@@ -337,10 +347,10 @@ class RealTimeMonitor:
             
             # 패턴 점수 조건 (시장 단계별 조정)
             min_pattern_score = 70.0 if market_phase != 'opening' else 75.0
-            pattern_condition = position.total_pattern_score >= min_pattern_score
+            pattern_condition = stock.total_pattern_score >= min_pattern_score
             
             # 중복 신호 방지
-            signal_key = f"{position.stock_code}_buy"
+            signal_key = f"{stock.stock_code}_buy"
             duplicate_prevention = signal_key not in self.alert_sent
             
             buy_signal = (volume_condition and price_condition and 
@@ -349,18 +359,18 @@ class RealTimeMonitor:
             if buy_signal:
                 self.alert_sent.add(signal_key)
                 self.buy_signals_detected += 1
-                logger.info(f"🚀 {position.stock_code} 매수 신호 ({market_phase}): "
+                logger.info(f"🚀 {stock.stock_code} 매수 신호 ({market_phase}): "
                            f"거래량({volume_spike_ratio:.1f}배≥{volume_threshold:.1f}), "
                            f"상승률({price_change_rate:.2%}≥{price_threshold:.1%}), "
-                           f"패턴점수({position.total_pattern_score:.1f}≥{min_pattern_score})")
+                           f"패턴점수({stock.total_pattern_score:.1f}≥{min_pattern_score})")
             
             return buy_signal
             
         except Exception as e:
-            logger.error(f"매수 조건 분석 오류 {position.stock_code}: {e}")
+            logger.error(f"매수 조건 분석 오류 {stock.stock_code}: {e}")
             return False
     
-    def analyze_sell_conditions(self, position: Position, realtime_data: Dict) -> Optional[str]:
+    def analyze_sell_conditions(self, stock: Stock, realtime_data: Dict) -> Optional[str]:
         """매도 조건 분석 (장시간 최적화)
         
         Args:
@@ -371,14 +381,14 @@ class RealTimeMonitor:
             매도 사유 또는 None
         """
         try:
-            current_price = realtime_data.get('current_price', position.close_price)
+            current_price = realtime_data.get('current_price', stock.close_price)
             market_phase = self.get_market_phase()
             
             # 시장 단계별 매도 조건 조정
             if market_phase == 'pre_close':
                 # 마감 전에는 보수적으로 매도
-                if position.buy_price is not None:
-                    unrealized_pnl_rate = (current_price - position.buy_price) / position.buy_price * 100
+                if stock.buy_price is not None:
+                    unrealized_pnl_rate = (current_price - stock.buy_price) / stock.buy_price * 100
                     if unrealized_pnl_rate >= 0.5:  # 0.5% 이상 수익시 매도
                         return "pre_close_profit"
             elif market_phase == 'closing':
@@ -386,24 +396,24 @@ class RealTimeMonitor:
                 return "market_close"
             
             # 기본 매도 조건들
-            if position.should_stop_loss(current_price):
+            if stock.should_stop_loss(current_price):
                 return "stop_loss"
             
-            if position.should_take_profit(current_price):
+            if stock.should_take_profit(current_price):
                 return "take_profit"
             
-            if position.is_holding_period_exceeded():
+            if stock.is_holding_period_exceeded():
                 return "holding_period"
             
             # 급락 감지 매도 (최근 5분간 3% 이상 하락)
-            price_history = self._get_price_history(position.stock_code)
+            price_history = self._get_price_history(stock.stock_code)
             if self._detect_rapid_decline(price_history, current_price):
                 return "rapid_decline"
             
             return None
             
         except Exception as e:
-            logger.error(f"매도 조건 분석 오류 {position.stock_code}: {e}")
+            logger.error(f"매도 조건 분석 오류 {stock.stock_code}: {e}")
             return None
     
     def _get_price_history(self, stock_code: str) -> List[float]:
@@ -421,114 +431,136 @@ class RealTimeMonitor:
         
         return decline_rate >= 0.03  # 3% 이상 급락
     
-    def process_buy_ready_stocks(self) -> int:
+    def process_buy_ready_stocks(self) -> Dict[str, int]:
         """매수 준비 상태 종목들 처리 (장시간 최적화)
         
         Returns:
-            처리된 종목 수
+            처리 결과 딕셔너리 {'checked': 확인한 종목 수, 'signaled': 신호 발생 수, 'ordered': 주문 접수 수}
         """
-        processed_count = 0
+        result = {'checked': 0, 'signaled': 0, 'ordered': 0}
         
         try:
             # 선정된 종목들 중 매수 준비 상태인 것들 조회
-            ready_stocks = self.stock_manager.get_stocks_by_status(PositionStatus.WATCHING)
+            ready_stocks = self.stock_manager.get_stocks_by_status(StockStatus.WATCHING)
             
-            for position in ready_stocks:
+            for stock in ready_stocks:
+                result['checked'] += 1
+                
                 try:
                     # 실시간 데이터 조회
-                    realtime_data = self.fetch_realtime_data(position.stock_code)
+                    realtime_data = self.fetch_realtime_data(stock.stock_code)
                     
                     if not realtime_data:
                         continue
                     
                     # 매수 조건 확인
-                    if self.analyze_buy_conditions(position, realtime_data):
+                    if self.analyze_buy_conditions(stock, realtime_data):
+                        result['signaled'] += 1
+                        
                         # 매수량 계산
-                        buy_quantity = self.calculate_buy_quantity(position)
+                        buy_quantity = self.calculate_buy_quantity(stock)
                         
                         if buy_quantity > 0:
                             # 매수 주문 실행
-                            current_positions = len(self.stock_manager.get_stocks_by_status(PositionStatus.BOUGHT))
+                            current_positions = len(self.stock_manager.get_stocks_by_status(StockStatus.BOUGHT))
                             success = self.trade_executor.execute_buy_order(
-                                position=position,
+                                stock=stock,
                                 price=realtime_data['current_price'],
                                 quantity=buy_quantity,
                                 current_positions_count=current_positions
                             )
                             
                             if success:
-                                # 매수 체결 확인 (실제로는 API 응답 확인)
-                                self.trade_executor.confirm_buy_execution(position)
-                                processed_count += 1
-                                self.orders_executed += 1
+                                # 주문 접수 성공 - 체결은 별도로 웹소켓 체결통보에서 처리
+                                result['ordered'] += 1
+                                self.buy_orders_submitted += 1  # 클래스 통계 업데이트
                                 
-                                logger.info(f"✅ 매수 실행: {position.stock_code} {buy_quantity}주 @{realtime_data['current_price']:,}원")
+                                logger.info(f"📝 매수 주문 접수: {stock.stock_code} "
+                                           f"{buy_quantity}주 @{realtime_data['current_price']:,}원 "
+                                           f"- 체결 대기 중 (웹소켓 체결통보 대기)")
+                                
+                                # 체결 확인은 웹소켓 체결통보에서 처리하므로 여기서는 하지 않음
+                                # StockManager의 웹소켓 콜백에서 체결통보 수신 시 처리됨
+                                
+                            else:
+                                # 주문 접수 실패
+                                logger.error(f"❌ 매수 주문 접수 실패: {stock.stock_code} "
+                                            f"{buy_quantity}주 @{realtime_data['current_price']:,}원")
                         
                 except Exception as e:
-                    logger.error(f"매수 처리 오류 {position.stock_code}: {e}")
+                    logger.error(f"매수 처리 오류 {stock.stock_code}: {e}")
                     continue
             
-            return processed_count
+            return result
             
         except Exception as e:
             logger.error(f"매수 준비 종목 처리 오류: {e}")
-            return 0
+            return result
     
-    def process_sell_ready_stocks(self) -> int:
+    def process_sell_ready_stocks(self) -> Dict[str, int]:
         """매도 준비 상태 종목들 처리 (장시간 최적화)
         
         Returns:
-            처리된 종목 수
+            처리 결과 딕셔너리 {'checked': 확인한 종목 수, 'signaled': 신호 발생 수, 'ordered': 주문 접수 수}
         """
-        processed_count = 0
+        result = {'checked': 0, 'signaled': 0, 'ordered': 0}
         
         try:
             # 보유 중인 종목들 조회
-            holding_stocks = self.stock_manager.get_stocks_by_status(PositionStatus.BOUGHT)
+            holding_stocks = self.stock_manager.get_stocks_by_status(StockStatus.BOUGHT)
             
-            for position in holding_stocks:
+            for stock in holding_stocks:
+                result['checked'] += 1
+                
                 try:
                     # 실시간 데이터 조회
-                    realtime_data = self.fetch_realtime_data(position.stock_code)
+                    realtime_data = self.fetch_realtime_data(stock.stock_code)
                     
                     if not realtime_data:
                         continue
                     
                     # 매도 조건 확인
-                    sell_reason = self.analyze_sell_conditions(position, realtime_data)
+                    sell_reason = self.analyze_sell_conditions(stock, realtime_data)
                     
                     if sell_reason:
+                        result['signaled'] += 1
+                        self.sell_signals_detected += 1
+                        
                         # 매도 주문 실행
                         success = self.trade_executor.execute_sell_order(
-                            position=position,
+                            stock=stock,
                             price=realtime_data['current_price'],
                             reason=sell_reason
                         )
                         
                         if success:
-                            # 매도 체결 확인 (실제로는 API 응답 확인)
-                            self.trade_executor.confirm_sell_execution(position, realtime_data['current_price'])
-                            processed_count += 1
-                            self.orders_executed += 1
-                            self.sell_signals_detected += 1
+                            # 주문 접수 성공 - 체결은 별도로 웹소켓 체결통보에서 처리
+                            result['ordered'] += 1
+                            self.sell_orders_submitted += 1  # 클래스 통계 업데이트
                             
                             # 중복 알림 방지 제거
-                            signal_key = f"{position.stock_code}_buy"
+                            signal_key = f"{stock.stock_code}_buy"
                             self.alert_sent.discard(signal_key)
                             
-                            logger.info(f"✅ 매도 실행: {position.stock_code} @{realtime_data['current_price']:,}원 (사유: {sell_reason})")
+                            logger.info(f"📝 매도 주문 접수: {stock.stock_code} "
+                                       f"@{realtime_data['current_price']:,}원 (사유: {sell_reason}) "
+                                       f"- 체결 대기 중 (웹소켓 체결통보 대기)")
+                        else:
+                            # 주문 접수 실패
+                            logger.error(f"❌ 매도 주문 접수 실패: {stock.stock_code} "
+                                        f"@{realtime_data['current_price']:,}원 (사유: {sell_reason})")
                         
                 except Exception as e:
-                    logger.error(f"매도 처리 오류 {position.stock_code}: {e}")
+                    logger.error(f"매도 처리 오류 {stock.stock_code}: {e}")
                     continue
             
-            return processed_count
+            return result
             
         except Exception as e:
             logger.error(f"매도 준비 종목 처리 오류: {e}")
-            return 0
+            return result
     
-    def calculate_buy_quantity(self, position: Position) -> int:
+    def calculate_buy_quantity(self, stock: Stock) -> int:
         """매수량 계산 (장시간 최적화)
         
         Args:
@@ -553,17 +585,17 @@ class RealTimeMonitor:
                 investment_amount = base_amount
             
             # 포지션 크기에 따른 추가 조정
-            current_positions = len(self.stock_manager.get_stocks_by_status(PositionStatus.BOUGHT))
+            current_positions = len(self.stock_manager.get_stocks_by_status(StockStatus.BOUGHT))
             max_positions = self.risk_config.get('max_positions', 5)
             
             if current_positions >= max_positions * 0.8:  # 80% 이상 차면 보수적
                 investment_amount *= 0.7
             
-            quantity = int(investment_amount / position.close_price)
+            quantity = int(investment_amount / stock.close_price)
             return max(quantity, 1)  # 최소 1주
             
         except Exception as e:
-            logger.error(f"매수량 계산 오류 {position.stock_code}: {e}")
+            logger.error(f"매수량 계산 오류 {stock.stock_code}: {e}")
             return 0
     
     def monitor_cycle(self):
@@ -596,14 +628,14 @@ class RealTimeMonitor:
                 self._log_performance_metrics()
             
             # 매수 준비 종목 처리
-            buy_processed = self.process_buy_ready_stocks()
+            buy_result = self.process_buy_ready_stocks()
             
             # 매도 준비 종목 처리  
-            sell_processed = self.process_sell_ready_stocks()
+            sell_result = self.process_sell_ready_stocks()
             
             # 주기적 상태 리포트 (1분마다)
             if self.market_scan_count % (60 // self.current_monitoring_interval) == 0:
-                self._log_status_report(buy_processed, sell_processed)
+                self._log_status_report(buy_result, sell_result)
                 
         except Exception as e:
             logger.error(f"모니터링 사이클 오류: {e}")
@@ -620,7 +652,7 @@ class RealTimeMonitor:
             
             for pos in positions:
                 status_counts[pos.status.value] += 1
-                if pos.status == PositionStatus.BOUGHT:
+                if pos.status == StockStatus.BOUGHT:
                     current_price = self.price_cache.get(pos.stock_code, pos.close_price)
                     unrealized_pnl = pos.calculate_unrealized_pnl(current_price)
                     total_unrealized_pnl += unrealized_pnl
@@ -638,14 +670,15 @@ class RealTimeMonitor:
         except Exception as e:
             logger.error(f"성능 지표 로깅 오류: {e}")
     
-    def _log_status_report(self, buy_processed: int, sell_processed: int):
+    def _log_status_report(self, buy_result: Dict[str, int], sell_result: Dict[str, int]):
         """상태 리포트 로깅"""
         try:
             current_time = now_kst().strftime("%H:%M:%S")
             market_phase = self.get_market_phase()
             
             logger.info(f"🕐 {current_time} ({market_phase}) - "
-                       f"매수처리: {buy_processed}건, 매도처리: {sell_processed}건, "
+                       f"매수(확인:{buy_result['checked']}/신호:{buy_result['signaled']}/주문:{buy_result['ordered']}), "
+                       f"매도(확인:{sell_result['checked']}/신호:{sell_result['signaled']}/주문:{sell_result['ordered']}), "
                        f"모니터링주기: {self.current_monitoring_interval}초")
                        
         except Exception as e:
@@ -759,26 +792,26 @@ class RealTimeMonitor:
         logger.info("🚨 모든 포지션 강제 매도 시작")
         
         sold_count = 0
-        holding_stocks = self.stock_manager.get_stocks_by_status(PositionStatus.BOUGHT)
+        holding_stocks = self.stock_manager.get_stocks_by_status(StockStatus.BOUGHT)
         
-        for position in holding_stocks:
+        for stock in holding_stocks:
             try:
-                realtime_data = self.fetch_realtime_data(position.stock_code)
-                current_price = realtime_data['current_price'] if realtime_data else position.close_price
+                realtime_data = self.fetch_realtime_data(stock.stock_code)
+                current_price = realtime_data['current_price'] if realtime_data else stock.close_price
                 
                 success = self.trade_executor.execute_sell_order(
-                    position=position,
+                    stock=stock,
                     price=current_price,
                     reason="force_close"
                 )
                 
                 if success:
-                    self.trade_executor.confirm_sell_execution(position, current_price)
+                    self.trade_executor.confirm_sell_execution(stock, current_price)
                     sold_count += 1
-                    logger.info(f"강제 매도: {position.stock_code}")
+                    logger.info(f"강제 매도: {stock.stock_code}")
                     
             except Exception as e:
-                logger.error(f"강제 매도 실패 {position.stock_code}: {e}")
+                logger.error(f"강제 매도 실패 {stock.stock_code}: {e}")
         
         logger.info(f"강제 매도 완료: {sold_count}개 포지션")
         return sold_count

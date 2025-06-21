@@ -21,7 +21,7 @@ class KISWebSocketSubscriptionManager:
         self.subscribed_stocks: Set[str] = set()
         self.subscription_lock = threading.Lock()
 
-        # 다중 콜백 시스템
+        # 다중 콜백 시스템 (기존 - 데이터 타입 기반)
         self.stock_callbacks: Dict[str, List[Callable]] = {}  # 종목별 콜백들
         self.global_callbacks: Dict[str, List[Callable]] = {   # 데이터 타입별 글로벌 콜백들
             'stock_price': [],
@@ -30,22 +30,57 @@ class KISWebSocketSubscriptionManager:
             'market_index': []
         }
 
+        # 새로운 콜백 시스템 (TR_ID 기반 - StockManager 연동용)
+        self.tr_id_callbacks: Dict[str, List[Callable]] = {
+            'H0STCNT0': [],  # 실시간 체결가
+            'H0STASP0': [],  # 실시간 호가
+            'H0STCNI0': [],  # 체결통보
+        }
+
         # 통계
         self.stats = {
             'subscriptions': 0
         }
 
+    # === 기존 데이터 타입 기반 콜백 시스템 ===
+
     def add_global_callback(self, data_type: str, callback: Callable[[Dict], None]):
-        """글로벌 콜백 함수 추가"""
+        """글로벌 콜백 함수 추가 (데이터 타입 기반)"""
         if data_type in self.global_callbacks:
             self.global_callbacks[data_type].append(callback)
             logger.debug(f"글로벌 콜백 추가: {data_type}")
 
     def remove_global_callback(self, data_type: str, callback: Callable[[Dict], None]):
-        """글로벌 콜백 함수 제거"""
+        """글로벌 콜백 함수 제거 (데이터 타입 기반)"""
         if data_type in self.global_callbacks and callback in self.global_callbacks[data_type]:
             self.global_callbacks[data_type].remove(callback)
             logger.debug(f"글로벌 콜백 제거: {data_type}")
+
+    def get_global_callbacks(self, data_type: str) -> List[Callable]:
+        """특정 데이터 타입의 글로벌 콜백 목록 반환"""
+        return self.global_callbacks.get(data_type, [])
+
+    # === 새로운 TR_ID 기반 콜백 시스템 (StockManager 연동용) ===
+
+    def add_tr_id_callback(self, tr_id: str, callback: Callable):
+        """TR_ID 기반 콜백 함수 추가 (StockManager 연동용)"""
+        if tr_id not in self.tr_id_callbacks:
+            self.tr_id_callbacks[tr_id] = []
+        
+        self.tr_id_callbacks[tr_id].append(callback)
+        logger.debug(f"TR_ID 콜백 추가: {tr_id}")
+
+    def remove_tr_id_callback(self, tr_id: str, callback: Callable):
+        """TR_ID 기반 콜백 함수 제거"""
+        if tr_id in self.tr_id_callbacks and callback in self.tr_id_callbacks[tr_id]:
+            self.tr_id_callbacks[tr_id].remove(callback)
+            logger.debug(f"TR_ID 콜백 제거: {tr_id}")
+
+    def get_tr_id_callbacks(self, tr_id: str) -> List[Callable]:
+        """특정 TR_ID의 콜백 목록 반환"""
+        return self.tr_id_callbacks.get(tr_id, [])
+
+    # === 종목별 콜백 시스템 ===
 
     def add_stock_callback(self, stock_code: str, callback: Callable):
         """종목별 콜백 함수 추가"""
@@ -61,6 +96,12 @@ class KISWebSocketSubscriptionManager:
             if not self.stock_callbacks[stock_code]:
                 del self.stock_callbacks[stock_code]
             logger.debug(f"종목별 콜백 제거: {stock_code}")
+
+    def get_callbacks_for_stock(self, stock_code: str) -> List[Callable]:
+        """특정 종목의 콜백 목록 반환"""
+        return self.stock_callbacks.get(stock_code, [])
+
+    # === 구독 관리 ===
 
     def can_subscribe(self, stock_code: str) -> bool:
         """구독 가능 여부 확인"""
@@ -125,14 +166,6 @@ class KISWebSocketSubscriptionManager:
             self.subscribed_stocks.clear()
             self.stock_callbacks.clear()
 
-    def get_callbacks_for_stock(self, stock_code: str) -> List[Callable]:
-        """특정 종목의 콜백 목록 반환"""
-        return self.stock_callbacks.get(stock_code, [])
-
-    def get_global_callbacks(self, data_type: str) -> List[Callable]:
-        """특정 데이터 타입의 글로벌 콜백 목록 반환"""
-        return self.global_callbacks.get(data_type, [])
-
     def get_status(self) -> Dict:
         """구독 관리자 상태 반환"""
         with self.subscription_lock:
@@ -141,5 +174,7 @@ class KISWebSocketSubscriptionManager:
                 'max_stocks': self.MAX_STOCKS,
                 'websocket_usage': f"{len(self.subscribed_stocks) * 2}/{self.WEBSOCKET_LIMIT}",
                 'subscribed_stocks': list(self.subscribed_stocks),
+                'global_callback_counts': {k: len(v) for k, v in self.global_callbacks.items()},
+                'tr_id_callback_counts': {k: len(v) for k, v in self.tr_id_callbacks.items()},
                 'stats': self.stats.copy()
             }

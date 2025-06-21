@@ -99,7 +99,7 @@ class TradeManager:
             # 웹소켓 메시지 루프 시작
             if not websocket_manager.is_running:
                 logger.info("웹소켓 메시지 루프 시작...")
-                websocket_manager.start_message_loop()
+                websocket_manager.start()
                 
                 # 메시지 루프가 시작될 때까지 잠시 대기
                 await asyncio.sleep(2)

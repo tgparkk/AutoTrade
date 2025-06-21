@@ -2,10 +2,13 @@
 장시작전 시장 스캔 및 종목 선정을 담당하는 MarketScanner 클래스
 """
 
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any, TYPE_CHECKING
 from datetime import datetime, timedelta
-from models.position import Position
+from models.stock import Stock
 from .stock_manager import StockManager
+
+if TYPE_CHECKING:
+    from websocket.kis_websocket_manager import KISWebSocketManager
 from utils.korean_time import now_kst
 from utils.logger import setup_logger
 from utils import get_trading_config_loader
@@ -80,7 +83,7 @@ class MarketScanner:
         
         logger.info("MarketScanner 초기화 완료")
     
-    def set_websocket_manager(self, websocket_manager):
+    def set_websocket_manager(self, websocket_manager: "KISWebSocketManager"):
         """웹소켓 매니저 설정
         
         Args:
@@ -535,6 +538,15 @@ class MarketScanner:
                     volume=stock_info['yesterday_volume'],
                     selection_score=score
                 )
+                
+                # 🆕 명시적으로 WATCHING 상태로 설정 (매수 대기 상태)
+                if success:
+                    from models.stock import StockStatus
+                    self.stock_manager.change_stock_status(
+                        stock_code=stock_code, 
+                        new_status=StockStatus.WATCHING,
+                        reason="market_scan_selected"
+                    )
                 
                 if success:
                     success_count += 1

@@ -78,7 +78,8 @@ class KISWebSocketMessageHandler:
                     parsed_data = self.data_parser.parse_contract_data(raw_data)
 
                 if parsed_data:
-                    await self._execute_callbacks(DataType.STOCK_PRICE.value, parsed_data)
+                    # TR_ID 기반 콜백 실행 (StockManager 연동용)
+                    await self._execute_tr_id_callbacks(tr_id, parsed_data)
 
             elif tr_id == KIS_WSReq.BID_ASK.value:
                 # 실시간 호가
@@ -94,7 +95,8 @@ class KISWebSocketMessageHandler:
                     parsed_data = self.data_parser.parse_bid_ask_data(raw_data)
 
                 if parsed_data:
-                    await self._execute_callbacks(DataType.STOCK_ORDERBOOK.value, parsed_data)
+                    # TR_ID 기반 콜백 실행 (StockManager 연동용) 
+                    await self._execute_tr_id_callbacks(tr_id, parsed_data)
 
             elif tr_id in [KIS_WSReq.NOTICE.value]:
                 # 체결통보 - 간단하게 처리
@@ -103,12 +105,14 @@ class KISWebSocketMessageHandler:
                 decrypted_data = self.data_parser.decrypt_notice_data(raw_data)
                 if decrypted_data:
                     logger.info(f"✅ 체결통보 복호화 성공")
-                    await self._execute_callbacks(DataType.STOCK_EXECUTION.value,
-                                                {'data': decrypted_data, 'timestamp': datetime.now()})
+                    execution_data = {'data': decrypted_data, 'timestamp': datetime.now()}
+                    # TR_ID 기반 콜백 실행 (StockManager 연동용)
+                    await self._execute_tr_id_callbacks(tr_id, execution_data)
                 else:
                     logger.warning(f"❌ 체결통보 복호화 실패 - 원본 데이터로 처리")
-                    await self._execute_callbacks(DataType.STOCK_EXECUTION.value,
-                                                {'data': raw_data, 'timestamp': datetime.now()})
+                    execution_data = {'data': raw_data, 'timestamp': datetime.now()}
+                    # TR_ID 기반 콜백 실행 (StockManager 연동용)
+                    await self._execute_tr_id_callbacks(tr_id, execution_data)
 
             else:
                 logger.warning(f"⚠️ 알 수 없는 TR_ID: {tr_id}")
@@ -177,35 +181,29 @@ class KISWebSocketMessageHandler:
             self.stats['errors'] += 1
             return None
 
-    async def _execute_callbacks(self, data_type: str, data: Dict):
-        """콜백 함수들 실행"""
+    async def _execute_tr_id_callbacks(self, tr_id: str, data: Dict):
+        """TR_ID 기반 콜백 함수들 실행 (StockManager 연동용)"""
         try:
-            # 글로벌 콜백 실행
-            global_callbacks = self.subscription_manager.get_global_callbacks(data_type)
-            for callback in global_callbacks:
+            tr_id_callbacks = self.subscription_manager.get_tr_id_callbacks(tr_id)
+            stock_code = data.get('stock_code', '')
+            
+            for callback in tr_id_callbacks:
                 try:
                     if asyncio.iscoroutinefunction(callback):
-                        await callback(data_type, data)
+                        if tr_id == 'H0STCNI0':  # 체결통보는 stock_code 없이
+                            await callback(tr_id, data)
+                        else:  # 체결가, 호가는 stock_code 포함
+                            await callback(tr_id, stock_code, data)
                     else:
-                        callback(data_type, data)
+                        if tr_id == 'H0STCNI0':  # 체결통보는 stock_code 없이
+                            callback(tr_id, data)
+                        else:  # 체결가, 호가는 stock_code 포함
+                            callback(tr_id, stock_code, data)
                 except Exception as e:
-                    logger.error(f"글로벌 콜백 실행 오류 ({data_type}): {e}")
-
-            # 종목별 콜백 실행 (stock_code가 있는 경우)
-            stock_code = data.get('stock_code')
-            if stock_code:
-                stock_callbacks = self.subscription_manager.get_callbacks_for_stock(stock_code)
-                for callback in stock_callbacks:
-                    try:
-                        if asyncio.iscoroutinefunction(callback):
-                            await callback(data_type, stock_code, data)
-                        else:
-                            callback(data_type, stock_code, data)
-                    except Exception as e:
-                        logger.error(f"종목별 콜백 실행 오류 ({stock_code}): {e}")
+                    logger.error(f"TR_ID 콜백 실행 오류 ({tr_id}): {e}")
 
         except Exception as e:
-            logger.error(f"콜백 실행 오류: {e}")
+            logger.error(f"TR_ID 콜백 실행 오류: {e}")
 
     def get_stats(self) -> Dict:
         """메시지 처리 통계 반환"""
