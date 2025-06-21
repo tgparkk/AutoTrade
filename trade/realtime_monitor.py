@@ -345,7 +345,7 @@ class RealTimeMonitor:
             if buy_signal:
                 self.alert_sent.add(signal_key)
                 self.buy_signals_detected += 1
-                logger.info(f"🚀 {stock.stock_code} 매수 신호 ({market_phase}): "
+                logger.info(f"🚀 {stock.stock_code}({stock.stock_name}) 매수 신호 ({market_phase}): "
                            f"거래량({volume_spike_ratio:.1f}배≥{volume_threshold:.1f}), "
                            f"상승률({price_change_rate:.2%}≥{price_threshold:.1%}), "
                            f"체결강도({contract_strength:.1f}≥{contract_strength_min:.1f}), "
@@ -721,7 +721,7 @@ class RealTimeMonitor:
             final_quantity = max(quantity, 1)
             final_amount = final_quantity * current_price
             
-            logger.info(f"💰 매수량 계산 완료: {stock.stock_code} "
+            logger.info(f"💰 매수량 계산 완료: {stock.stock_code}({stock.stock_name}) "
                        f"{final_quantity}주 @{current_price:,}원 = {final_amount:,}원 "
                        f"(시장단계: {market_phase}, 기준금액: {base_amount:,}원)")
             
