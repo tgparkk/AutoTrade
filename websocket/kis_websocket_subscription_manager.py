@@ -5,6 +5,7 @@ KIS 웹소켓 구독 관리 전담 클래스
 import threading
 from typing import Set, Dict, List, Callable, Optional
 from utils.logger import setup_logger
+from utils import get_trading_config_loader
 
 logger = setup_logger(__name__)
 
@@ -13,8 +14,11 @@ class KISWebSocketSubscriptionManager:
     """KIS 웹소켓 구독 관리 전담 클래스"""
 
     def __init__(self, max_stocks: int = 19):
-        # 웹소켓 제한
-        self.WEBSOCKET_LIMIT = 41
+        # 🔥 설정 파일에서 웹소켓 제한 로드 (하드코딩 제거)
+        config_loader = get_trading_config_loader()
+        strategy_config = config_loader.load_trading_strategy_config()
+        
+        self.WEBSOCKET_LIMIT = strategy_config.get('websocket_max_connections', 41)
         self.MAX_STOCKS = max_stocks
 
         # 구독 관리

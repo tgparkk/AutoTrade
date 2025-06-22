@@ -153,9 +153,7 @@ class TradingConfigLoader:
             'pre_market_scan_time': self.get_value('PRE_MARKET_SCAN_TIME', section, '08:30'),
             'trading_enabled': self.get_bool('TRADING_ENABLED', section, True),
             'weekend_trading': self.get_bool('WEEKEND_TRADING', section, False),
-            'lunch_break_start': self.get_value('LUNCH_BREAK_START', section, '12:00'),
-            'lunch_break_end': self.get_value('LUNCH_BREAK_END', section, '13:00'),
-            'lunch_break_trading': self.get_bool('LUNCH_BREAK_TRADING', section, False)
+            # 점심시간 설정 제거됨 (사용하지 않음)
         }
         
         logger.info("시장 일정 설정 로드 완료")

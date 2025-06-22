@@ -46,7 +46,7 @@ class TradingConditionAnalyzer:
         logger.info("TradingConditionAnalyzer 초기화 완료")
     
     def get_market_phase(self) -> str:
-        """현재 시장 단계 확인 (외부에서 주입받을 수도 있음)
+        """현재 시장 단계 확인 (정확한 시장 시간 기준: 09:00~15:30)
         
         Returns:
             시장 단계 ('opening', 'active', 'lunch', 'pre_close', 'closing', 'closed')
@@ -54,20 +54,37 @@ class TradingConditionAnalyzer:
         from datetime import time as dt_time
         
         current_time = now_kst().time()
+        current_weekday = now_kst().weekday()
         
-        # 간단한 시장 단계 판단 (필요시 외부에서 주입)
+        # 주말 체크 (토: 5, 일: 6)
+        if current_weekday >= 5:
+            return 'closed'
+        
+        # 🔥 정확한 시장 시간 기준 (09:00~15:30)
+        market_open = dt_time(9, 0)    # 09:00
+        market_close = dt_time(15, 30) # 15:30
+        
+        # 시장 마감 후
+        if current_time > market_close:
+            return 'closed'
+        
+        # 시장 개장 전
+        if current_time < market_open:
+            return 'closed'
+        
+        # 시장 시간 내 단계별 구분
         if current_time <= dt_time(9, 30):
-            return 'opening'
+            return 'opening'        # 09:00~09:30 장 초반
         elif current_time <= dt_time(12, 0):
-            return 'active'
+            return 'active'         # 09:30~12:00 활성 거래
         elif current_time <= dt_time(13, 0):
-            return 'lunch'
+            return 'lunch'          # 12:00~13:00 점심시간
         elif current_time <= dt_time(14, 50):
-            return 'active'
+            return 'active'         # 13:00~14:50 활성 거래
         elif current_time <= dt_time(15, 0):
-            return 'pre_close'
+            return 'pre_close'      # 14:50~15:00 마감 전
         else:
-            return 'closing'
+            return 'closing'        # 15:00~15:30 마감 시간
     
     def analyze_buy_conditions(self, stock: Stock, realtime_data: Dict, 
                               market_phase: Optional[str] = None) -> bool:

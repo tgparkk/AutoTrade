@@ -134,13 +134,7 @@ class RealTimeMonitor:
         
         current_time = now_kst().time()
         
-        # 점심시간 체크 (12:00~13:00)
-        lunch_start = dt_time(12, 0)
-        lunch_end = dt_time(13, 0)
-        lunch_trading = self.market_config.get('lunch_break_trading', False)
-        
-        if not lunch_trading and lunch_start <= current_time <= lunch_end:
-            return False
+        # 점심시간 거래 제한 없음 (설정 제거됨)
         
         # 데이트레이딩 종료 시간 체크
         if current_time >= self.day_trading_exit_time:
@@ -149,28 +143,13 @@ class RealTimeMonitor:
         return True
     
     def get_market_phase(self) -> str:
-        """현재 시장 단계 확인
+        """현재 시장 단계 확인 (TradingConditionAnalyzer 위임)
         
         Returns:
             시장 단계 ('opening', 'active', 'lunch', 'pre_close', 'closing', 'closed')
         """
-        current_time = now_kst().time()
-        
-        if not self.is_market_open():
-            return 'closed'
-        
-        if current_time <= dt_time(9, 30):
-            return 'opening'
-        elif current_time <= dt_time(12, 0):
-            return 'active'
-        elif current_time <= dt_time(13, 0):
-            return 'lunch'
-        elif current_time <= self.pre_close_time:
-            return 'active'
-        elif current_time <= self.day_trading_exit_time:
-            return 'pre_close'
-        else:
-            return 'closing'
+        # TradingConditionAnalyzer의 get_market_phase 사용 (중복 제거)
+        return self.condition_analyzer.get_market_phase()
     
     def adjust_monitoring_frequency(self):
         """시장 상황에 따른 모니터링 주기 동적 조정"""
@@ -584,12 +563,16 @@ class RealTimeMonitor:
             if market_phase not in ['active']:
                 return
             
-            # 웹소켓 슬롯 여유 확인 (41개 한도 - 현재 사용량)
-            current_websocket_count = len(self.stock_manager.get_all_positions()) * 2 + 1  # 종목당 2개 + 체결통보 1개
-            available_slots = 41 - current_websocket_count
+            # 🔥 설정 기반 웹소켓 슬롯 여유 확인 (하드코딩 제거)
+            websocket_max = self.strategy_config.get('websocket_max_connections', 41)
+            connections_per_stock = self.strategy_config.get('websocket_connections_per_stock', 2)
+            system_connections = self.strategy_config.get('websocket_system_connections', 1)
             
-            if available_slots < self.websocket_slots_minimum_reserve:  # 설정 기반 최소 슬롯 여유 필요
-                logger.debug(f"웹소켓 슬롯 부족으로 장중 스캔 생략 (사용:{current_websocket_count}/41, 여유:{available_slots})")
+            current_websocket_count = len(self.stock_manager.get_all_positions()) * connections_per_stock + system_connections
+            available_slots = websocket_max - current_websocket_count
+            
+            if available_slots < self.websocket_slots_minimum_reserve:
+                logger.debug(f"웹소켓 슬롯 부족으로 장중 스캔 생략 (사용:{current_websocket_count}/{websocket_max}, 여유:{available_slots})")
                 return
             
             # 30분 간격 체크
