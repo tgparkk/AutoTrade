@@ -6,7 +6,7 @@ import time
 from enum import Enum
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Tuple
 from utils.korean_time import now_kst
 
 
@@ -109,6 +109,12 @@ class RealtimeData:
     price_change_rate: float = 0.0     # 시가 대비 등락률
     volatility: float = 0.0            # 변동성
     
+    # 🆕 데이트레이딩 특화 필드 (시간 민감성 계산용)
+    avg_volume: float = 0.0            # 평균 거래량 (시간 민감성 계산용)
+    last_significant_price_change: datetime = field(default_factory=now_kst)  # 마지막 유의미한 가격 변동 시점
+    price_momentum_score: float = 0.0   # 가격 모멘텀 점수 (계산된 값)
+    volume_momentum_score: float = 0.0  # 거래량 모멘텀 점수 (계산된 값)
+    
     # 업데이트 시간 (한국시간)
     last_updated: datetime = field(default_factory=now_kst)
     
@@ -148,6 +154,89 @@ class RealtimeData:
         if self.sell_contract_count + self.buy_contract_count == 0:
             return 0.0
         return (self.buy_contract_count - self.sell_contract_count) / (self.buy_contract_count + self.sell_contract_count)
+    
+    def calculate_momentum_scores(self) -> Tuple[float, float]:
+        """🚀 모멘텀 점수 계산 (데이트레이딩 특화)
+        
+        Returns:
+            (가격 모멘텀 점수, 거래량 모멘텀 점수)
+        """
+        # 가격 모멘텀 점수 계산 (0~15점)
+        price_momentum = 0.0
+        if self.price_change_rate >= 3.0:
+            price_momentum = 15.0
+        elif self.price_change_rate >= 2.0:
+            price_momentum = 12.0
+        elif self.price_change_rate >= 1.0:
+            price_momentum = 8.0
+        elif self.price_change_rate >= 0.5:
+            price_momentum = 5.0
+        elif self.price_change_rate >= 0:
+            price_momentum = 2.0
+        
+        # 거래량 모멘텀 점수 계산 (0~15점)
+        volume_momentum = 0.0
+        if self.volume_spike_ratio >= 5.0:
+            volume_momentum = 15.0
+        elif self.volume_spike_ratio >= 3.0:
+            volume_momentum = 12.0
+        elif self.volume_spike_ratio >= 2.0:
+            volume_momentum = 8.0
+        elif self.volume_spike_ratio >= 1.5:
+            volume_momentum = 5.0
+        elif self.volume_spike_ratio >= 1.2:
+            volume_momentum = 2.0
+        
+        # 계산된 값 저장
+        self.price_momentum_score = price_momentum
+        self.volume_momentum_score = volume_momentum
+        
+        return price_momentum, volume_momentum
+    
+    def get_total_momentum_score(self) -> float:
+        """총 모멘텀 점수 반환 (체결강도 포함)"""
+        price_momentum, volume_momentum = self.calculate_momentum_scores()
+        
+        # 체결강도 모멘텀 (0~10점)
+        strength_momentum = 0.0
+        if self.contract_strength >= 150:
+            strength_momentum = 10.0
+        elif self.contract_strength >= 130:
+            strength_momentum = 8.0
+        elif self.contract_strength >= 110:
+            strength_momentum = 5.0
+        elif self.contract_strength >= 100:
+            strength_momentum = 3.0
+        elif self.contract_strength >= 90:
+            strength_momentum = 1.0
+        
+        return price_momentum + volume_momentum + strength_momentum
+    
+    def update_avg_volume(self, new_volume: int, time_weight: float = 0.1):
+        """평균 거래량 업데이트 (지수 이동 평균 방식)
+        
+        Args:
+            new_volume: 새로운 거래량
+            time_weight: 시간 가중치 (0.1 = 10% 반영)
+        """
+        if self.avg_volume <= 0:
+            self.avg_volume = float(new_volume)
+        else:
+            self.avg_volume = (1 - time_weight) * self.avg_volume + time_weight * new_volume
+    
+    def check_significant_price_change(self, threshold: float = 0.005) -> bool:
+        """유의미한 가격 변동 감지
+        
+        Args:
+            threshold: 변동 임계값 (0.5% 기본)
+            
+        Returns:
+            유의미한 변동 여부
+        """
+        if abs(self.price_change_rate) >= threshold * 100:
+            self.last_significant_price_change = now_kst()
+            return True
+        return False
 
 
 @dataclass

@@ -89,7 +89,7 @@ class TradingConditionAnalyzer:
     
     def analyze_buy_conditions(self, stock: Stock, realtime_data: Dict, 
                               market_phase: Optional[str] = None) -> bool:
-        """매수 조건 분석 (점수 기반 현실적 시스템)
+        """데이트레이딩 특화 매수 조건 분석 (속도 최적화 + 모멘텀 중심)
         
         Args:
             stock: 주식 객체
@@ -104,153 +104,99 @@ class TradingConditionAnalyzer:
             if market_phase is None:
                 market_phase = self.get_market_phase()
             
-            # 기본 조건 체크
-            price_change_rate = realtime_data.get('price_change_rate', 0) / 100  # % to decimal
-            volume_spike_ratio = realtime_data.get('volume_spike_ratio', 1.0)
-            
-            # 🆕 공식 문서 기반 고급 지표 추출 (웹소켓에서 받은 추가 데이터)
-            contract_strength = getattr(stock.realtime_data, 'contract_strength', 100.0)
-            buy_ratio = getattr(stock.realtime_data, 'buy_ratio', 50.0)
-            market_pressure = getattr(stock.realtime_data, 'market_pressure', 'NEUTRAL')
+            # === 🚨 1단계: 즉시 배제 조건 (속도 최적화) ===
+            # 거래정지, VI발동 등 절대 금지 조건 우선 체크
             vi_standard_price = getattr(stock.realtime_data, 'vi_standard_price', 0)
             trading_halt = getattr(stock.realtime_data, 'trading_halt', False)
             
-            # 절대 금지 조건 (거래정지, VI발동)
             if trading_halt or (vi_standard_price > 0 and self.vi_activation_threshold):
                 logger.debug(f"거래 제외: {stock.stock_code} (거래정지: {trading_halt}, VI발동: {vi_standard_price > 0})")
                 return False
             
-            # 🔥 점수 기반 매수 조건 분석 시작
-            total_score = 0
-            max_possible_score = 100
-            condition_details = []
+            # 🆕 데이트레이딩 리스크 조기 차단
+            current_price = realtime_data.get('current_price', stock.close_price)
+            price_change_rate = realtime_data.get('price_change_rate', 0) / 100  # % to decimal
             
-            # 🔥 설정 기반 시장 단계별 조건 조정 (하드코딩 제거)
-            if market_phase == 'opening':
-                volume_threshold = self.strategy_config.get('volume_increase_threshold', 2.0) * self.strategy_config.get('opening_volume_multiplier', 1.5)
-                price_threshold = self.strategy_config.get('opening_price_threshold', 0.015)
-                contract_strength_min = self.contract_strength_threshold * self.strategy_config.get('opening_contract_strength_multiplier', 1.2)
-                buy_ratio_min = self.buy_ratio_threshold * self.strategy_config.get('opening_buy_ratio_multiplier', 1.1)
-                min_pattern_score = self.strategy_config.get('opening_pattern_score_threshold', 75.0)
-                required_total_score = self.performance_config.get('buy_score_opening_threshold', 70)
-            elif market_phase == 'pre_close':
-                volume_threshold = self.strategy_config.get('volume_increase_threshold', 2.0) * self.strategy_config.get('preclose_volume_multiplier', 2.0)
-                price_threshold = self.strategy_config.get('preclose_price_threshold', 0.02)
-                contract_strength_min = self.contract_strength_threshold * self.strategy_config.get('preclose_contract_strength_multiplier', 1.5)
-                buy_ratio_min = self.buy_ratio_threshold * self.strategy_config.get('preclose_buy_ratio_multiplier', 1.2)
-                min_pattern_score = self.strategy_config.get('opening_pattern_score_threshold', 75.0)
-                required_total_score = self.performance_config.get('buy_score_preclose_threshold', 75)
-            else:
-                volume_threshold = self.strategy_config.get('volume_increase_threshold', 2.0)
-                price_threshold = self.strategy_config.get('normal_price_threshold', 0.01)
-                contract_strength_min = self.contract_strength_threshold
-                buy_ratio_min = self.buy_ratio_threshold
-                min_pattern_score = self.strategy_config.get('normal_pattern_score_threshold', 70.0)
-                required_total_score = self.performance_config.get('buy_score_normal_threshold', 60)
+            # 급락 징후 체크 (5% 이상 하락)
+            if price_change_rate <= -0.05:
+                logger.debug(f"급락 종목 제외: {stock.stock_code} ({price_change_rate*100:.1f}%)")
+                return False
             
-            # === 점수 계산 시작 (총 100점 만점) ===
-            
-            # 1. 이격도 조건 (0~25점) - 데이트레이딩 핵심 지표 (가장 중요)
-            divergence_score, divergence_info = self._analyze_divergence_buy_score(stock, market_phase)
-            total_score += divergence_score
-            condition_details.append(f"이격도(+{divergence_score}점, {divergence_info})")
-            
-            # 2. 거래량 조건 (0~20점) - 모멘텀 확인
-            if volume_spike_ratio >= volume_threshold:
-                volume_score = min(20, int(volume_spike_ratio / volume_threshold * 15))
-                total_score += volume_score
-                condition_details.append(f"거래량(+{volume_score}점)")
-            elif volume_spike_ratio >= volume_threshold * 0.8:  # 80% 달성시 부분 점수
-                volume_score = 12
-                total_score += volume_score
-                condition_details.append(f"거래량(+{volume_score}점, 부분달성)")
-            
-            # 3. 가격 상승률 조건 (0~15점)
-            if price_change_rate >= price_threshold:
-                price_score = min(15, int(price_change_rate / price_threshold * 12))
-                total_score += price_score
-                condition_details.append(f"상승률(+{price_score}점)")
-            elif price_change_rate >= price_threshold * 0.7:  # 70% 달성시 부분 점수
-                price_score = 8
-                total_score += price_score
-                condition_details.append(f"상승률(+{price_score}점, 부분달성)")
-            
-            # 4. 체결강도 조건 (0~15점)
-            if contract_strength >= contract_strength_min:
-                strength_score = min(15, int((contract_strength - contract_strength_min) / 20 + 10))
-                total_score += strength_score
-                condition_details.append(f"체결강도(+{strength_score}점)")
-            elif contract_strength >= contract_strength_min * 0.85:  # 85% 달성시 부분 점수
-                strength_score = 8
-                total_score += strength_score
-                condition_details.append(f"체결강도(+{strength_score}점, 부분달성)")
-            
-            # 5. 패턴 점수 조건 (0~10점)
-            if stock.total_pattern_score >= min_pattern_score:
-                pattern_score = min(10, int((stock.total_pattern_score - min_pattern_score) / 10 + 7))
-                total_score += pattern_score
-                condition_details.append(f"패턴(+{pattern_score}점)")
-            elif stock.total_pattern_score >= min_pattern_score * 0.8:  # 80% 달성시 부분 점수
-                pattern_score = 5
-                total_score += pattern_score
-                condition_details.append(f"패턴(+{pattern_score}점, 부분달성)")
-            
-            # 6. 매수비율 조건 (0~10점)
-            if buy_ratio >= buy_ratio_min:
-                ratio_score = min(10, int((buy_ratio - buy_ratio_min) / 10 + 7))
-                total_score += ratio_score
-                condition_details.append(f"매수비율(+{ratio_score}점)")
-            elif buy_ratio >= buy_ratio_min * 0.8:  # 80% 달성시 부분 점수
-                ratio_score = 5
-                total_score += ratio_score
-                condition_details.append(f"매수비율(+{ratio_score}점, 부분달성)")
-            
-            # 7. 최소 거래량 조건 (0~5점)
-            min_volume = self.strategy_config.get('volume_min_threshold', 100000)
-            current_volume = realtime_data.get('volume', 0)
-            if current_volume >= min_volume:
-                total_score += 5
-                condition_details.append("최소거래량(+5점)")
-            elif current_volume >= min_volume * 0.7:  # 70% 달성시 부분 점수
-                total_score += 3
-                condition_details.append("최소거래량(+3점, 부분달성)")
-            
-            # 8. 시장압력 조건 (0~5점)
-            if market_pressure == 'BUY':
-                total_score += 5
-                condition_details.append("시장압력(+5점, 매수우세)")
-            elif market_pressure == 'NEUTRAL':
-                total_score += 3
-                condition_details.append("시장압력(+3점, 중립)")
-            # SELL인 경우 0점 (감점 없음)
-            
-            # 9. 호가 스프레드 조건 (0~5점)
+            # 🆕 유동성 부족 체크 (호가 스프레드 너무 큰 경우)
             bid_price = realtime_data.get('bid_price', 0)
             ask_price = realtime_data.get('ask_price', 0)
             if bid_price > 0 and ask_price > 0:
                 spread_rate = (ask_price - bid_price) / bid_price
-                spread_threshold = self.strategy_config.get('spread_threshold', 0.01)
-                if spread_rate <= spread_threshold:
-                    total_score += 5
-                    condition_details.append("호가스프레드(+5점)")
-                elif spread_rate <= spread_threshold * 2:  # 2배 이내면 부분 점수
-                    total_score += 2
-                    condition_details.append("호가스프레드(+2점, 부분달성)")
-            else:
-                total_score += 3  # 데이터 없으면 중간 점수
-                condition_details.append("호가스프레드(+3점, 데이터없음)")
+                max_spread = self.strategy_config.get('max_spread_threshold', 0.05)  # 5%
+                if spread_rate > max_spread:
+                    logger.debug(f"유동성 부족 제외: {stock.stock_code} (스프레드: {spread_rate*100:.1f}%)")
+                    return False
             
-            # === 최종 매수 신호 판단 ===
-            max_possible_score = 100  # 총점 100점으로 수정
+            # === 🚀 2단계: 모멘텀 우선 검증 (데이트레이딩 핵심) ===
+            volume_spike_ratio = realtime_data.get('volume_spike_ratio', 1.0)
+            contract_strength = getattr(stock.realtime_data, 'contract_strength', 100.0)
+            buy_ratio = getattr(stock.realtime_data, 'buy_ratio', 50.0)
+            
+            # 🆕 모멘텀 점수 계산 (0~40점) - 데이트레이딩에서 가장 중요
+            momentum_score = self._calculate_momentum_score(
+                price_change_rate, volume_spike_ratio, contract_strength, market_phase
+            )
+            
+            # 🆕 모멘텀 최소 기준 미달시 즉시 배제 (속도 최적화)
+            min_momentum_score = self._get_min_momentum_score(market_phase)
+            if momentum_score < min_momentum_score:
+                logger.debug(f"모멘텀 부족 제외: {stock.stock_code} "
+                           f"(모멘텀점수: {momentum_score}/{min_momentum_score})")
+                return False
+            
+            # === 📊 3단계: 세부 조건 점수 계산 ===
+            total_score = momentum_score  # 모멘텀 점수부터 시작
+            condition_details = [f"모멘텀({momentum_score}점)"]
+            
+            # 🔥 설정 기반 시장 단계별 조건 조정
+            thresholds = self._get_market_phase_thresholds(market_phase)
+            
+            # 이격도 조건 (0~25점) - 진입 타이밍
+            divergence_score, divergence_info = self._analyze_divergence_buy_score(stock, market_phase)
+            total_score += divergence_score
+            condition_details.append(f"이격도({divergence_score}점, {divergence_info})")
+            
+            # 🆕 시간 민감성 점수 (0~15점) - 데이트레이딩 특화
+            time_score = self._calculate_time_sensitivity_score(market_phase, stock)
+            total_score += time_score
+            condition_details.append(f"시간민감성({time_score}점)")
+            
+            # 매수비율 조건 (0~10점)
+            if buy_ratio >= thresholds['buy_ratio_min']:
+                ratio_score = min(10, int((buy_ratio - thresholds['buy_ratio_min']) / 10 + 7))
+                total_score += ratio_score
+                condition_details.append(f"매수비율({ratio_score}점)")
+            elif buy_ratio >= thresholds['buy_ratio_min'] * 0.8:
+                ratio_score = 5
+                total_score += ratio_score
+                condition_details.append(f"매수비율({ratio_score}점, 부분달성)")
+            
+            # 패턴 점수 조건 (0~10점)
+            if stock.total_pattern_score >= thresholds['min_pattern_score']:
+                pattern_score = min(10, int((stock.total_pattern_score - thresholds['min_pattern_score']) / 10 + 7))
+                total_score += pattern_score
+                condition_details.append(f"패턴({pattern_score}점)")
+            elif stock.total_pattern_score >= thresholds['min_pattern_score'] * 0.8:
+                pattern_score = 5
+                total_score += pattern_score
+                condition_details.append(f"패턴({pattern_score}점, 부분달성)")
+            
+            # === 🎯 최종 매수 신호 판단 ===
+            required_total_score = thresholds['required_total_score']
             buy_signal = total_score >= required_total_score
             
             if buy_signal:
                 logger.info(f"🚀 {stock.stock_code}({stock.stock_name}) 매수 신호 ({market_phase}): "
-                           f"총점 {total_score}/{max_possible_score}점 (기준:{required_total_score}점) "
+                           f"총점 {total_score}/100점 (기준:{required_total_score}점) "
                            f"- {', '.join(condition_details)}")
             else:
                 logger.debug(f"❌ {stock.stock_code} 매수 조건 미달: "
-                            f"총점 {total_score}/{max_possible_score}점 (기준:{required_total_score}점) "
+                            f"총점 {total_score}/100점 (기준:{required_total_score}점) "
                             f"- {', '.join(condition_details)}")
             
             return buy_signal
@@ -258,6 +204,162 @@ class TradingConditionAnalyzer:
         except Exception as e:
             logger.error(f"매수 조건 분석 오류 {stock.stock_code}: {e}")
             return False
+    
+    def _calculate_momentum_score(self, price_change_rate: float, volume_spike_ratio: float, 
+                                 contract_strength: float, market_phase: str) -> int:
+        """🚀 모멘텀 점수 계산 (데이트레이딩 핵심, 0~40점) - RealtimeData 활용"""
+        momentum_score = 0
+        
+        # 1. 가격 상승 모멘텀 (0~15점)
+        if price_change_rate >= 0.03:  # 3% 이상
+            momentum_score += 15
+        elif price_change_rate >= 0.02:  # 2% 이상
+            momentum_score += 12
+        elif price_change_rate >= 0.01:  # 1% 이상
+            momentum_score += 8
+        elif price_change_rate >= 0.005:  # 0.5% 이상
+            momentum_score += 5
+        elif price_change_rate >= 0:  # 상승
+            momentum_score += 2
+        
+        # 2. 거래량 모멘텀 (0~15점)
+        if volume_spike_ratio >= 5.0:  # 5배 이상
+            momentum_score += 15
+        elif volume_spike_ratio >= 3.0:  # 3배 이상
+            momentum_score += 12
+        elif volume_spike_ratio >= 2.0:  # 2배 이상
+            momentum_score += 8
+        elif volume_spike_ratio >= 1.5:  # 1.5배 이상
+            momentum_score += 5
+        elif volume_spike_ratio >= 1.2:  # 1.2배 이상
+            momentum_score += 2
+        
+        # 3. 체결강도 모멘텀 (0~10점)
+        if contract_strength >= 150:  # 매우 강함
+            momentum_score += 10
+        elif contract_strength >= 130:  # 강함
+            momentum_score += 8
+        elif contract_strength >= 110:  # 양호
+            momentum_score += 5
+        elif contract_strength >= 100:  # 보통
+            momentum_score += 3
+        elif contract_strength >= 90:  # 약함
+            momentum_score += 1
+        
+        # 시장 단계별 보정
+        if market_phase == 'opening':
+            # 장 초반: 모멘텀 더 중요시
+            momentum_score = int(momentum_score * 1.1)
+        elif market_phase == 'pre_close':
+            # 마감 전: 모멘텀 보수적 평가
+            momentum_score = int(momentum_score * 0.9)
+        
+        return min(40, momentum_score)
+    
+    def _calculate_time_sensitivity_score(self, market_phase: str, stock: Stock) -> int:
+        """⏰ 시간 민감성 점수 계산 (데이트레이딩 특화, 0~15점) - RealtimeData 활용"""
+        time_score = 0
+        current_time = now_kst()
+        
+        # 1. 시장 단계별 기본 점수 (0~8점)
+        if market_phase == 'opening':
+            time_score += 6  # 장 초반 적극적
+        elif market_phase == 'active':
+            time_score += 8  # 활성 시간 최고
+        elif market_phase == 'pre_close':
+            time_score += 3  # 마감 전 보수적
+        elif market_phase == 'closing':
+            time_score += 1  # 마감 시간 매우 보수적
+        else:
+            time_score += 0  # 비활성 시간
+        
+        # 2. 분 단위 세밀한 타이밍 (0~4점)
+        minute = current_time.minute
+        if market_phase == 'opening':
+            # 장 초반 10분이 골든타임
+            if minute <= 10:
+                time_score += 4
+            elif minute <= 20:
+                time_score += 2
+            elif minute <= 30:
+                time_score += 1
+        elif market_phase == 'active':
+            # 정시 근처에서 변동성 증가
+            if minute in [0, 15, 30, 45]:
+                time_score += 3
+            elif minute in range(55, 60) or minute in range(0, 5):
+                time_score += 2
+        
+        # 3. 🆕 개선된 거래 활동성 기반 보정 (0~3점)
+        realtime_data = stock.realtime_data
+        
+        # 평균 거래량 업데이트 (실시간)
+        if realtime_data.today_volume > 0:
+            realtime_data.update_avg_volume(realtime_data.today_volume)
+        
+        # 거래량 활동성 점수
+        if realtime_data.avg_volume > 0:
+            volume_activity_ratio = realtime_data.today_volume / realtime_data.avg_volume
+            if volume_activity_ratio >= 3.0:  # 3배 이상 활발
+                time_score += 3
+            elif volume_activity_ratio >= 2.0:  # 2배 이상 활발
+                time_score += 2
+            elif volume_activity_ratio >= 1.5:  # 1.5배 이상 활발
+                time_score += 1
+        else:
+            time_score += 1  # 데이터 없으면 중간 점수
+        
+        # 4. 🆕 가격 변동 시간 민감성 (추가 보정)
+        if realtime_data.check_significant_price_change():
+            time_elapsed = (current_time - realtime_data.last_significant_price_change).total_seconds() / 60
+            if time_elapsed <= 2:  # 2분 이내 유의미한 변동
+                time_score = min(time_score + 2, 15)  # 최대 2점 추가 (상한 15점)
+        
+        return min(15, time_score)
+    
+    def _get_min_momentum_score(self, market_phase: str) -> int:
+        """시장 단계별 최소 모멘텀 점수 반환
+        
+        Args:
+            market_phase: 시장 단계
+            
+        Returns:
+            최소 모멘텀 점수
+        """
+        if market_phase == 'opening':
+            return self.performance_config.get('min_momentum_opening', 20)
+        elif market_phase == 'pre_close':
+            return self.performance_config.get('min_momentum_preclose', 25)
+        else:
+            return self.performance_config.get('min_momentum_normal', 15)
+    
+    def _get_market_phase_thresholds(self, market_phase: str) -> Dict:
+        """시장 단계별 임계값 반환
+        
+        Args:
+            market_phase: 시장 단계
+            
+        Returns:
+            임계값 딕셔너리
+        """
+        if market_phase == 'opening':
+            return {
+                'buy_ratio_min': self.buy_ratio_threshold * self.strategy_config.get('opening_buy_ratio_multiplier', 1.1),
+                'min_pattern_score': self.strategy_config.get('opening_pattern_score_threshold', 75.0),
+                'required_total_score': self.performance_config.get('buy_score_opening_threshold', 70)
+            }
+        elif market_phase == 'pre_close':
+            return {
+                'buy_ratio_min': self.buy_ratio_threshold * self.strategy_config.get('preclose_buy_ratio_multiplier', 1.2),
+                'min_pattern_score': self.strategy_config.get('opening_pattern_score_threshold', 75.0),
+                'required_total_score': self.performance_config.get('buy_score_preclose_threshold', 75)
+            }
+        else:
+            return {
+                'buy_ratio_min': self.buy_ratio_threshold,
+                'min_pattern_score': self.strategy_config.get('normal_pattern_score_threshold', 70.0),
+                'required_total_score': self.performance_config.get('buy_score_normal_threshold', 60)
+            }
     
     def _analyze_divergence_buy_score(self, stock: Stock, market_phase: str) -> Tuple[int, str]:
         """이격도 기반 매수 점수 계산 (0~25점) - 데이트레이딩 핵심 지표

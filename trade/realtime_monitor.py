@@ -57,25 +57,25 @@ class RealTimeMonitor:
         self.normal_monitoring_interval = self.performance_config.get('normal_monitoring_interval', 10)
         self.current_monitoring_interval = self.fast_monitoring_interval
         
-        # 모니터링 상태
-        self.is_monitoring = False
+        # 모니터링 상태 (스레드 안전성 개선)
+        self._monitoring_lock = threading.RLock()  # 모니터링 상태 보호용
+        self._is_monitoring = threading.Event()    # 스레드 안전한 플래그
         self.monitor_thread = None
         self.websocket_manager = None
         
-        # 중복 알림 방지 (유지)
-        self.alert_sent = set()
+        # 🆕 원자적 통계 업데이트를 위한 락
+        self._stats_lock = threading.RLock()
         
-        # 장시간 통계
-        self.market_scan_count = 0
-        self.buy_signals_detected = 0
-        self.sell_signals_detected = 0
-        self.orders_executed = 0
+        # 통계 (원자적 접근 보장)
+        self._market_scan_count = 0
+        self._buy_signals_detected = 0
+        self._sell_signals_detected = 0
+        self._buy_orders_executed = 0
+        self._sell_orders_executed = 0
+        self._last_scan_time = None
         
-        # 세분화된 주문 통계
-        self.buy_orders_submitted = 0    # 매수 주문 접수 수
-        self.sell_orders_submitted = 0   # 매도 주문 접수 수
-        self.buy_orders_executed = 0     # 매수 체결 수 (웹소켓에서 업데이트)
-        self.sell_orders_executed = 0    # 매도 체결 수 (웹소켓에서 업데이트)
+        # 🆕 스레드 안전한 종료 플래그
+        self._shutdown_requested = threading.Event()
         
         # 🔥 설정 기반 시장 시간 (하드코딩 제거)
         self.market_open_time = dt_time(
@@ -99,6 +99,9 @@ class RealTimeMonitor:
         self.market_volatility_threshold = self.strategy_config.get('market_volatility_threshold', 0.02)
         self.high_volume_threshold = self.strategy_config.get('high_volume_threshold', 3.0)
         self.high_volatility_position_ratio = self.strategy_config.get('high_volatility_position_ratio', 0.3)
+        
+        # 중복 알림 방지 (유지)
+        self.alert_sent = set()
         
         # 🔥 설정 기반 장중 추가 종목 스캔 (하드코딩 제거)
         self.last_intraday_scan_time = None
@@ -279,7 +282,7 @@ class RealTimeMonitor:
         
         if buy_signal:
             self.alert_sent.add(signal_key)
-            self.buy_signals_detected += 1
+            self._buy_signals_detected += 1
         
         return buy_signal
     
@@ -341,7 +344,7 @@ class RealTimeMonitor:
                             if success:
                                 # 주문 접수 성공 - 체결은 별도로 웹소켓 체결통보에서 처리
                                 result['ordered'] += 1
-                                self.buy_orders_submitted += 1  # 클래스 통계 업데이트
+                                self._buy_orders_executed += 1  # 클래스 통계 업데이트
                                 
                                 logger.info(f"📝 매수 주문 접수: {stock.stock_code} "
                                            f"{buy_quantity}주 @{realtime_data['current_price']:,}원 "
@@ -389,7 +392,7 @@ class RealTimeMonitor:
                     
                     if sell_reason:
                         result['signaled'] += 1
-                        self.sell_signals_detected += 1
+                        self._sell_signals_detected += 1
                         
                         # 매도 주문 실행
                         success = self.trade_executor.execute_sell_order(
@@ -401,7 +404,7 @@ class RealTimeMonitor:
                         if success:
                             # 주문 접수 성공 - 체결은 별도로 웹소켓 체결통보에서 처리
                             result['ordered'] += 1
-                            self.sell_orders_submitted += 1  # 클래스 통계 업데이트
+                            self._sell_orders_executed += 1  # 클래스 통계 업데이트
                             
                             # 중복 알림 방지 제거
                             signal_key = f"{stock.stock_code}_buy"
@@ -440,7 +443,7 @@ class RealTimeMonitor:
     def monitor_cycle(self):
         """모니터링 사이클 실행 (웹소켓 기반 최적화)"""
         try:
-            self.market_scan_count += 1
+            self._market_scan_count += 1
             
             # 시장 상황 확인 및 모니터링 주기 조정
             self.adjust_monitoring_frequency()
@@ -451,7 +454,7 @@ class RealTimeMonitor:
             if not test_mode:
                 # 실제 운영 모드: 시장시간 체크
                 if not self.is_market_open():
-                    if self.market_scan_count % 60 == 0:  # 10분마다 로그
+                    if self._market_scan_count % 60 == 0:  # 10분마다 로그
                         logger.info("시장 마감 - 대기 중...")
                     return
                 
@@ -459,7 +462,7 @@ class RealTimeMonitor:
                 if not self.is_trading_time():
                     market_phase = self.get_market_phase()
                     if market_phase == 'lunch':
-                        if self.market_scan_count % 30 == 0:  # 5분마다 로그
+                        if self._market_scan_count % 30 == 0:  # 5분마다 로그
                             logger.info("점심시간 - 모니터링만 실행")
                     elif market_phase == 'closing':
                         logger.info("장 마감 시간 - 보유 포지션 정리 중...")
@@ -468,13 +471,13 @@ class RealTimeMonitor:
             else:
                 # 테스트 모드: 시간 제한 없이 실행
                 test_mode_log_interval = self.strategy_config.get('test_mode_log_interval_cycles', 100)
-                if self.market_scan_count % test_mode_log_interval == 0:  # 설정 기반 테스트 모드 알림
+                if self._market_scan_count % test_mode_log_interval == 0:  # 설정 기반 테스트 모드 알림
                     logger.debug("테스트 모드 - 시장시간 무관하게 실행 중")
             
             # 🔥 설정 기반 성능 로깅 주기 (정확한 시간 간격 계산)
             performance_log_seconds = self.strategy_config.get('performance_log_interval_minutes', 5) * 60
             performance_check_interval = max(1, round(performance_log_seconds / self.current_monitoring_interval))
-            if self.market_scan_count % performance_check_interval == 0:
+            if self._market_scan_count % performance_check_interval == 0:
                 self._log_performance_metrics()
             
             # 매수 준비 종목 처리
@@ -495,19 +498,19 @@ class RealTimeMonitor:
             # 🔥 설정 기반 정체된 주문 타임아웃 체크 (정확한 시간 간격 계산)
             stuck_order_check_seconds = self.strategy_config.get('stuck_order_check_interval_seconds', 30)
             stuck_order_check_interval = max(1, round(stuck_order_check_seconds / self.current_monitoring_interval))
-            if self.market_scan_count % stuck_order_check_interval == 0:
+            if self._market_scan_count % stuck_order_check_interval == 0:
                 self._check_stuck_orders()
             
             # 🔥 설정 기반 주기적 상태 리포트 (정확한 시간 간격 계산)
             status_report_seconds = self.strategy_config.get('status_report_interval_minutes', 1) * 60
             status_report_interval = max(1, round(status_report_seconds / self.current_monitoring_interval))
-            if self.market_scan_count % status_report_interval == 0:
+            if self._market_scan_count % status_report_interval == 0:
                 self._log_status_report(buy_result, sell_result)
             
             # 🔥 주기적 메모리 정리 (1시간마다)
             memory_cleanup_seconds = 3600  # 1시간
             memory_cleanup_interval = max(1, round(memory_cleanup_seconds / self.current_monitoring_interval))
-            if self.market_scan_count % memory_cleanup_interval == 0:
+            if self._market_scan_count % memory_cleanup_interval == 0:
                 self._cleanup_expired_data()
                 
         except Exception as e:
@@ -532,10 +535,10 @@ class RealTimeMonitor:
                     total_unrealized_pnl += unrealized_pnl
             
             logger.info(f"📊 성능 지표 ({market_phase}): "
-                       f"스캔횟수: {self.market_scan_count}, "
-                       f"매수신호: {self.buy_signals_detected}, "
-                       f"매도신호: {self.sell_signals_detected}, "
-                       f"주문실행: {self.orders_executed}, "
+                       f"스캔횟수: {self._market_scan_count}, "
+                       f"매수신호: {self._buy_signals_detected}, "
+                       f"매도신호: {self._sell_signals_detected}, "
+                       f"주문실행: {self._buy_orders_executed + self._sell_orders_executed}, "
                        f"미실현손익: {total_unrealized_pnl:+,.0f}원")
             
             logger.info(f"📈 포지션 현황: " + 
@@ -978,7 +981,7 @@ class RealTimeMonitor:
     
     def stop_monitoring(self):
         """모니터링 중지"""
-        self.is_monitoring = False
+        self._is_monitoring.clear()
         
         if self.monitor_thread and self.monitor_thread.is_alive():
             self.monitor_thread.join(timeout=5)
@@ -994,10 +997,10 @@ class RealTimeMonitor:
             logger.info("=" * 60)
             logger.info("📊 최종 성능 리포트")
             logger.info("=" * 60)
-            logger.info(f"총 스캔 횟수: {self.market_scan_count:,}회")
-            logger.info(f"매수 신호 감지: {self.buy_signals_detected}건")
-            logger.info(f"매도 신호 감지: {self.sell_signals_detected}건")
-            logger.info(f"주문 실행: {self.orders_executed}건")
+            logger.info(f"총 스캔 횟수: {self._market_scan_count:,}회")
+            logger.info(f"매수 신호 감지: {self._buy_signals_detected}건")
+            logger.info(f"매도 신호 감지: {self._sell_signals_detected}건")
+            logger.info(f"주문 실행: {self._buy_orders_executed + self._sell_orders_executed}건")
             
             # 거래 통계
             trade_stats = self.trade_executor.get_trade_statistics()
@@ -1014,15 +1017,15 @@ class RealTimeMonitor:
         recovery_stats = self.order_recovery_manager.get_recovery_statistics()
         
         return {
-            'is_monitoring': self.is_monitoring,
+            'is_monitoring': self._is_monitoring.is_set(),
             'is_market_open': self.is_market_open(),
             'is_trading_time': self.is_trading_time(),
             'market_phase': self.get_market_phase(),
             'monitoring_interval': self.current_monitoring_interval,
-            'market_scan_count': self.market_scan_count,
-            'buy_signals_detected': self.buy_signals_detected,
-            'sell_signals_detected': self.sell_signals_detected,
-            'orders_executed': self.orders_executed,
+            'market_scan_count': self._market_scan_count,
+            'buy_signals_detected': self._buy_signals_detected,
+            'sell_signals_detected': self._sell_signals_detected,
+            'orders_executed': self._buy_orders_executed + self._sell_orders_executed,
             'websocket_stocks': len(self.stock_manager.realtime_data),  # 웹소켓 관리 종목 수
             'alerts_sent': len(self.alert_sent),
             'order_recovery_stats': recovery_stats  # 🆕 주문 복구 통계 추가
@@ -1064,10 +1067,10 @@ class RealTimeMonitor:
     
     def __str__(self) -> str:
         """문자열 표현"""
-        return (f"RealTimeMonitor(모니터링: {self.is_monitoring}, "
+        return (f"RealTimeMonitor(모니터링: {self._is_monitoring.is_set()}, "
                 f"주기: {self.current_monitoring_interval}초, "
-                f"스캔횟수: {self.market_scan_count}, "
-                f"신호감지: 매수{self.buy_signals_detected}/매도{self.sell_signals_detected}, "
+                f"스캔횟수: {self._market_scan_count}, "
+                f"신호감지: 매수{self._buy_signals_detected}/매도{self._sell_signals_detected}, "
                 f"웹소켓종목: {len(self.stock_manager.realtime_data)}개)")
     
     def get_sell_condition_analysis(self) -> Dict:
