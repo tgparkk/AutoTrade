@@ -105,6 +105,15 @@ class RealTimeMonitor:
         self.intraday_scan_interval = self.performance_config.get('intraday_scan_interval_minutes', 30) * 60  # 분을 초로 변환
         self.max_additional_stocks = self.performance_config.get('max_intraday_selected_stocks', 10)
         
+        # 🔥 웹소켓 구독 대기열 초기화 (스레드 안전성을 위한 메인 스레드 처리)
+        self._pending_websocket_subscriptions = set()
+        self._failed_subscription_retry_count = {}  # 재시도 카운터
+        
+        # 🔥 장중 스캔 관련 인스턴스 변수 초기화
+        self._market_scanner_instance = None
+        self._intraday_scan_result_queue = None
+        self._intraday_scan_thread = None
+        
         logger.info("RealTimeMonitor 초기화 완료 (웹소켓 기반 최적화 버전 + 장중추가스캔)")
     
     def is_market_open(self) -> bool:
@@ -462,9 +471,10 @@ class RealTimeMonitor:
                 if self.market_scan_count % test_mode_log_interval == 0:  # 설정 기반 테스트 모드 알림
                     logger.debug("테스트 모드 - 시장시간 무관하게 실행 중")
             
-            # 🔥 설정 기반 성능 로깅 주기
+            # 🔥 설정 기반 성능 로깅 주기 (정확한 시간 간격 계산)
             performance_log_seconds = self.strategy_config.get('performance_log_interval_minutes', 5) * 60
-            if self.market_scan_count % (performance_log_seconds // self.current_monitoring_interval) == 0:
+            performance_check_interval = max(1, round(performance_log_seconds / self.current_monitoring_interval))
+            if self.market_scan_count % performance_check_interval == 0:
                 self._log_performance_metrics()
             
             # 매수 준비 종목 처리
@@ -476,15 +486,29 @@ class RealTimeMonitor:
             # 🆕 장중 추가 종목 스캔
             self._check_and_run_intraday_scan()
             
-            # 🔥 설정 기반 정체된 주문 타임아웃 체크
+            # 🔥 백그라운드 장중 스캔 결과 처리 (큐 기반 스레드 안전)
+            self._process_background_scan_results()
+            
+            # 🔥 대기 중인 웹소켓 구독 처리 (메인 스레드에서 안전하게 처리)
+            self._process_pending_websocket_subscriptions()
+            
+            # 🔥 설정 기반 정체된 주문 타임아웃 체크 (정확한 시간 간격 계산)
             stuck_order_check_seconds = self.strategy_config.get('stuck_order_check_interval_seconds', 30)
-            if self.market_scan_count % (stuck_order_check_seconds // self.current_monitoring_interval) == 0:
+            stuck_order_check_interval = max(1, round(stuck_order_check_seconds / self.current_monitoring_interval))
+            if self.market_scan_count % stuck_order_check_interval == 0:
                 self._check_stuck_orders()
             
-            # 🔥 설정 기반 주기적 상태 리포트
+            # 🔥 설정 기반 주기적 상태 리포트 (정확한 시간 간격 계산)
             status_report_seconds = self.strategy_config.get('status_report_interval_minutes', 1) * 60
-            if self.market_scan_count % (status_report_seconds // self.current_monitoring_interval) == 0:
+            status_report_interval = max(1, round(status_report_seconds / self.current_monitoring_interval))
+            if self.market_scan_count % status_report_interval == 0:
                 self._log_status_report(buy_result, sell_result)
+            
+            # 🔥 주기적 메모리 정리 (1시간마다)
+            memory_cleanup_seconds = 3600  # 1시간
+            memory_cleanup_interval = max(1, round(memory_cleanup_seconds / self.current_monitoring_interval))
+            if self.market_scan_count % memory_cleanup_interval == 0:
+                self._cleanup_expired_data()
                 
         except Exception as e:
             logger.error(f"모니터링 사이클 오류: {e}")
@@ -553,6 +577,39 @@ class RealTimeMonitor:
         except Exception as e:
             logger.error(f"상태 리포트 로깅 오류: {e}")
     
+    def _cleanup_expired_data(self):
+        """만료된 데이터 정리 (메모리 누수 방지)"""
+        try:
+            cleanup_count = 0
+            
+            # 1. 알림 기록 정리
+            if self.alert_sent:
+                self.alert_sent.clear()
+                cleanup_count += 1
+                logger.debug("알림 기록 정리 완료")
+            
+            # 2. 실패한 웹소켓 구독 재시도 카운터 정리 (3회 초과한 것들)
+            expired_stocks = [
+                stock for stock, count in self._failed_subscription_retry_count.items()
+                if count >= 3
+            ]
+            for stock in expired_stocks:
+                self._failed_subscription_retry_count.pop(stock, None)
+                cleanup_count += 1
+            
+            # 3. 완료된 백그라운드 스레드 정리
+            if (hasattr(self, '_intraday_scan_thread') and 
+                self._intraday_scan_thread and 
+                not self._intraday_scan_thread.is_alive()):
+                self._intraday_scan_thread = None
+                cleanup_count += 1
+            
+            if cleanup_count > 0:
+                logger.info(f"🧹 메모리 정리 완료: {cleanup_count}개 항목 정리")
+                
+        except Exception as e:
+            logger.error(f"메모리 정리 오류: {e}")
+    
     def _check_and_run_intraday_scan(self):
         """장중 추가 종목 스캔 시간 체크 및 실행"""
         try:
@@ -605,25 +662,31 @@ class RealTimeMonitor:
                 
                 # 🔥 백그라운드 스레드에서 비동기 실행 (메인 루프 블로킹 방지)
                 import threading
+                import queue
+                
+                # 🔥 스레드 안전한 결과 전달을 위한 큐 사용
+                result_queue = queue.Queue()
                 
                 def background_intraday_scan():
-                    """백그라운드에서 장중 스캔 실행"""
+                    """백그라운드에서 장중 스캔 실행 (스레드 안전 개선)"""
                     try:
                         logger.debug(f"백그라운드 장중 스캔 스레드 시작 (PID: {threading.current_thread().ident})")
                         
-                        # MarketScanner 인스턴스 생성 및 장중 스캔 실행
-                        from trade.market_scanner import MarketScanner
-                        market_scanner = MarketScanner(self.stock_manager)
+                        # 🔥 MarketScanner 인스턴스를 클래스 변수로 재사용 (성능 개선)
+                        if self._market_scanner_instance is None:
+                            from trade.market_scanner import MarketScanner
+                            self._market_scanner_instance = MarketScanner(self.stock_manager)
                         
-                        additional_stocks = market_scanner.intraday_scan_additional_stocks(
+                        additional_stocks = self._market_scanner_instance.intraday_scan_additional_stocks(
                             max_stocks=max_new_stocks
                         )
                         
-                        # 결과 처리는 메인 스레드에서 안전하게 처리
-                        self._process_intraday_scan_results(additional_stocks)
+                        # 🔥 결과를 큐에 안전하게 전달 (스레드 간 직접 접근 방지)
+                        result_queue.put(('success', additional_stocks))
                         
                     except Exception as e:
                         logger.error(f"백그라운드 장중 스캔 오류: {e}")
+                        result_queue.put(('error', str(e)))
                 
                 # 백그라운드 스레드 시작
                 scan_thread = threading.Thread(
@@ -633,16 +696,48 @@ class RealTimeMonitor:
                 )
                 scan_thread.start()
                 
+                # 🔥 결과 큐를 인스턴스 변수로 저장 (다음 사이클에서 처리)
+                self._intraday_scan_result_queue = result_queue
+                self._intraday_scan_thread = scan_thread
+                
                 # 마지막 스캔 시간 즉시 업데이트 (중복 실행 방지)
                 self.last_intraday_scan_time = current_time
                 
                 logger.info(f"✅ 장중 스캔 백그라운드 시작 완료 (스레드: {scan_thread.name})")
                 
-                # 결과 처리는 _process_intraday_scan_results에서 별도 처리
                 return
                 
         except Exception as e:
             logger.error(f"장중 추가 종목 스캔 오류: {e}")
+    
+    def _process_background_scan_results(self):
+        """백그라운드 장중 스캔 결과 처리 (큐 기반 스레드 안전)"""
+        try:
+            # 결과 큐가 없으면 처리할 것 없음
+            if not hasattr(self, '_intraday_scan_result_queue') or self._intraday_scan_result_queue is None:
+                return
+            
+            # 큐에서 결과 확인 (논블로킹)
+            import queue
+            try:
+                status, result = self._intraday_scan_result_queue.get_nowait()
+                
+                if status == 'success':
+                    # 성공적으로 스캔 완료된 경우
+                    self._process_intraday_scan_results(result)
+                elif status == 'error':
+                    logger.error(f"백그라운드 장중 스캔 실패: {result}")
+                
+                # 처리 완료 후 큐와 스레드 참조 정리
+                self._intraday_scan_result_queue = None
+                self._intraday_scan_thread = None
+                
+            except queue.Empty:
+                # 아직 결과가 준비되지 않음 - 다음 사이클에서 다시 확인
+                pass
+                
+        except Exception as e:
+            logger.error(f"백그라운드 스캔 결과 처리 오류: {e}")
     
     def _process_intraday_scan_results(self, additional_stocks):
         """장중 스캔 결과 처리 (스레드 안전)"""
@@ -700,27 +795,137 @@ class RealTimeMonitor:
             logger.error(f"장중 스캔 결과 처리 오류: {e}")
     
     def _add_websocket_subscription_safely(self, stock_code: str):
-        """스레드 안전한 웹소켓 구독 추가"""
+        """스레드 안전한 웹소켓 구독 추가 (subscribe_stock_sync 방식)"""
         try:
             # StockManager가 웹소켓 매니저를 가지고 있는지 확인
             websocket_manager = getattr(self.stock_manager, 'websocket_manager', None)
-            if websocket_manager:
-                try:
-                    # 호가 구독
-                    websocket_manager.subscribe_orderbook(stock_code)
-                    # 체결가 구독  
-                    websocket_manager.subscribe_price(stock_code)
-                    logger.info(f"📡 웹소켓 구독 추가: {stock_code} (호가+체결가)")
-                except Exception as ws_e:
-                    logger.warning(f"웹소켓 구독 실패 {stock_code}: {ws_e}")
-            else:
+            if not websocket_manager:
                 logger.debug(f"웹소켓 매니저 없음 - 실시간 구독 생략: {stock_code}")
+                return False
+            
+            # 🔥 웹소켓 매니저 건강성 체크 추가
+            if not websocket_manager.is_websocket_healthy():
+                logger.warning(f"웹소켓 상태 불량 - 구독 실패: {stock_code}")
+                return False
+            
+            # 웹소켓 연결 상태 확인
+            if not websocket_manager.is_connected:
+                logger.warning(f"웹소켓 연결되지 않음 - 구독 실패: {stock_code}")
+                return False
+            
+            # 이미 구독된 경우 확인
+            if websocket_manager.is_subscribed(stock_code):
+                logger.debug(f"이미 구독된 종목: {stock_code}")
+                return True
+            
+            # 구독 가능 여부 확인
+            if not websocket_manager.has_subscription_capacity():
+                logger.warning(f"구독 한도 초과로 구독 실패: {stock_code}")
+                return False
+            
+            # 🔥 이벤트 루프 상태 확인 (subscribe_stock_sync 안전성 보장)
+            if not hasattr(websocket_manager, '_event_loop') or not websocket_manager._event_loop:
+                logger.warning(f"웹소켓 이벤트 루프 없음 - 구독 실패: {stock_code}")
+                return False
+            
+            if websocket_manager._event_loop.is_closed():
+                logger.warning(f"웹소켓 이벤트 루프 종료됨 - 구독 실패: {stock_code}")
+                return False
+            
+            # 🔥 subscribe_stock_sync 방식으로 스레드 안전한 구독 실행
+            try:
+                success = websocket_manager.subscribe_stock_sync(stock_code)
+                if success:
+                    logger.info(f"📡 웹소켓 구독 추가 성공: {stock_code} (체결가+호가)")
+                    return True
+                else:
+                    logger.warning(f"웹소켓 구독 실패: {stock_code}")
+                    return False
+                    
+            except Exception as ws_e:
+                logger.error(f"웹소켓 구독 오류 {stock_code}: {ws_e}")
+                return False
                 
         except Exception as e:
             logger.error(f"웹소켓 구독 추가 오류 {stock_code}: {e}")
+            return False
+    
+    def _process_pending_websocket_subscriptions(self):
+        """대기 중인 웹소켓 구독 처리 (메인 스레드에서 안전하게 실행)"""
+        try:
+            if not hasattr(self, '_pending_websocket_subscriptions'):
+                return
+            
+            if not self._pending_websocket_subscriptions:
+                return
+            
+            # 🔥 한 번에 처리할 최대 종목 수 제한 (메인 루프 블로킹 방지)
+            max_batch_size = self.performance_config.get('websocket_subscription_batch_size', 3)
+            
+            # 대기 중인 구독들을 배치 단위로 처리
+            pending_stocks = list(self._pending_websocket_subscriptions)
+            batch_stocks = pending_stocks[:max_batch_size]
+            
+            # 처리할 종목들만 대기열에서 제거
+            for stock_code in batch_stocks:
+                self._pending_websocket_subscriptions.discard(stock_code)
+            
+            if not batch_stocks:
+                return
+            
+            logger.debug(f"📡 웹소켓 구독 배치 처리: {len(batch_stocks)}개 (대기: {len(self._pending_websocket_subscriptions)}개)")
+            
+            success_count = 0
+            failed_stocks = []
+            
+            for stock_code in batch_stocks:
+                try:
+                    # 🔥 간단한 타임아웃 체크로 메인 루프 보호 (Windows 호환)
+                    start_time = time.time()
+                    max_duration = 2.0  # 2초 제한
+                    
+                    websocket_success = self._add_websocket_subscription_safely(stock_code)
+                    
+                    # 처리 시간 체크
+                    elapsed_time = time.time() - start_time
+                    if elapsed_time > max_duration:
+                        logger.warning(f"⏰ 웹소켓 구독 처리 시간 초과: {stock_code} ({elapsed_time:.1f}초)")
+                    
+                    if websocket_success:
+                        success_count += 1
+                        logger.debug(f"✅ 장중 종목 웹소켓 구독 성공: {stock_code}")
+                    else:
+                        failed_stocks.append(stock_code)
+                        logger.warning(f"⚠️ 장중 종목 웹소켓 구독 실패: {stock_code}")
+                        
+                except Exception as sub_e:
+                    failed_stocks.append(stock_code)
+                    logger.error(f"웹소켓 구독 처리 오류 {stock_code}: {sub_e}")
+            
+            # 🔥 실패한 구독들을 재시도 대기열에 추가 (최대 3회)
+            if failed_stocks:
+                if not hasattr(self, '_failed_subscription_retry_count'):
+                    self._failed_subscription_retry_count = {}
+                
+                for stock_code in failed_stocks:
+                    retry_count = self._failed_subscription_retry_count.get(stock_code, 0)
+                    if retry_count < 3:  # 최대 3회 재시도
+                        self._pending_websocket_subscriptions.add(stock_code)
+                        self._failed_subscription_retry_count[stock_code] = retry_count + 1
+                        logger.debug(f"🔄 웹소켓 구독 재시도 대기열 추가: {stock_code} ({retry_count + 1}/3회)")
+                    else:
+                        logger.error(f"❌ 웹소켓 구독 최대 재시도 초과: {stock_code} - 포기")
+                        self._failed_subscription_retry_count.pop(stock_code, None)
+            
+            if success_count > 0:
+                logger.info(f"📡 웹소켓 구독 배치 완료: {success_count}/{len(batch_stocks)}개 성공")
+                
+        except Exception as e:
+            logger.error(f"대기 중인 웹소켓 구독 처리 오류: {e}")
+            # 🔥 예외 발생 시에도 메인 루프는 계속 실행되도록 보장
     
     def _add_intraday_stock_safely(self, stock_code: str, stock_name: Optional[str], score: float, reasons: str) -> bool:
-        """스레드 안전한 장중 종목 추가"""
+        """스레드 안전한 장중 종목 추가 (웹소켓 구독은 메인 스레드에서 처리)"""
         try:
             # 종목명 안전 처리
             safe_stock_name = stock_name if stock_name else f"종목{stock_code}"
@@ -757,8 +962,12 @@ class RealTimeMonitor:
                     )
                     
                     if success:
-                        # 🔥 웹소켓 구독 추가 (실시간 모니터링 시작)
-                        self._add_websocket_subscription_safely(stock_code)
+                        # 🔥 웹소켓 구독은 메인 스레드에서 처리하도록 대기열에 추가
+                        if not hasattr(self, '_pending_websocket_subscriptions'):
+                            self._pending_websocket_subscriptions = set()
+                        self._pending_websocket_subscriptions.add(stock_code)
+                        
+                        logger.debug(f"✅ 장중 종목 추가 성공: {stock_code} (웹소켓 구독 대기열 추가)")
                         return True
                     
             return False

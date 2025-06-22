@@ -435,11 +435,12 @@ class TradeManager:
                 
                 if is_market_hours and market_monitoring_active:
                     logger.info("✅ 모니터링 사이클 실행 조건 충족 - monitor_cycle() 호출")
-                    # RealTimeMonitor의 monitor_cycle을 비동기 환경에서 안전하게 실행
+                    # 🔥 RealTimeMonitor의 monitor_cycle을 비동기 환경에서 안전하게 실행
                     try:
-                        # 동기 메서드를 별도 스레드에서 실행하지 않고 직접 호출
-                        # (monitor_cycle은 빠른 실행을 위해 설계됨)
-                        self.realtime_monitor.monitor_cycle()
+                        # 동기 메서드를 executor에서 비동기적으로 실행 (메인 루프 블로킹 방지)
+                        await asyncio.get_event_loop().run_in_executor(
+                            None, self.realtime_monitor.monitor_cycle
+                        )
                         logger.info("✅ monitor_cycle() 실행 완료")
                     except Exception as e:
                         logger.error(f"모니터링 사이클 실행 오류: {e}")

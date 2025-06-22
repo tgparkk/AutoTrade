@@ -11,7 +11,7 @@ AutoTrade 거래 데이터베이스 관리 클래스
 import sqlite3
 import json
 from datetime import datetime, date, timedelta
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Callable
 from pathlib import Path
 from utils.korean_time import now_kst
 from utils.logger import setup_logger
@@ -518,6 +518,129 @@ class TradeDatabase:
                 
         except Exception as e:
             logger.error(f"매도 주문 저장 실패: {e}")
+            return 0
+    
+    # === 체결 정보 저장 메서드들 (StockManager에서 이관) ===
+    
+    def save_buy_execution_to_db(self, stock_code: str, exec_price: float, exec_qty: int, 
+                                stock_metadata: Dict, trade_info: Dict, 
+                                get_current_market_phase_func: Callable[[], str]) -> int:
+        """매수 체결 정보를 데이터베이스에 저장 (StockManager에서 이관)
+        
+        Args:
+            stock_code: 종목코드
+            exec_price: 체결가격
+            exec_qty: 체결수량
+            stock_metadata: 종목 메타데이터
+            trade_info: 거래 정보
+            get_current_market_phase_func: 현재 시장 단계 조회 함수
+            
+        Returns:
+            저장된 레코드 ID
+        """
+        try:
+            from utils.korean_time import now_kst
+            
+            # 손절/익절 설정 조회
+            stop_loss_rate = 0
+            take_profit_rate = 0
+            if trade_info.get('stop_loss_price') and exec_price > 0:
+                stop_loss_rate = (trade_info['stop_loss_price'] - exec_price) / exec_price * 100
+            if trade_info.get('target_price') and exec_price > 0:
+                take_profit_rate = (trade_info['target_price'] - exec_price) / exec_price * 100
+            
+            order_data = {
+                'stock_code': stock_code,
+                'stock_name': stock_metadata.get('stock_name', ''),
+                'order_time': trade_info.get('buy_order_time', now_kst()),
+                'execution_time': now_kst(),  # 실제 체결 시점
+                'order_id': trade_info.get('buy_order_id', ''),
+                'order_orgno': trade_info.get('buy_order_orgno', ''),
+                'order_status': 'executed',  # 체결 완료
+                'order_price': exec_price,
+                'execution_price': exec_price,
+                'quantity': exec_qty,
+                'total_amount': exec_price * exec_qty,
+                'target_profit_rate': take_profit_rate,
+                'stop_loss_rate': stop_loss_rate,
+                'selection_source': stock_metadata.get('selection_source', 'unknown'),
+                'selection_criteria': stock_metadata.get('selection_criteria', {}),
+                'market_phase': get_current_market_phase_func(),
+                'position_size_ratio': 0.0  # 계산 필요시 추가
+            }
+            
+            db_id = self.save_buy_order(order_data)
+            if db_id > 0:
+                logger.info(f"📊 매수 체결 DB 저장 완료: {stock_code} (ID: {db_id})")
+            else:
+                logger.warning(f"⚠️ 매수 체결 DB 저장 실패: {stock_code}")
+            
+            return db_id
+            
+        except Exception as e:
+            logger.error(f"❌ 매수 체결 DB 저장 오류 {stock_code}: {e}")
+            return 0
+    
+    def save_sell_execution_to_db(self, stock_code: str, exec_price: float, exec_qty: int, 
+                                 realized_pnl: float, realized_pnl_rate: float,
+                                 stock_metadata: Dict, trade_info: Dict,
+                                 get_current_market_phase_func: Callable[[], str]) -> int:
+        """매도 체결 정보를 데이터베이스에 저장 (StockManager에서 이관)
+        
+        Args:
+            stock_code: 종목코드
+            exec_price: 체결가격
+            exec_qty: 체결수량
+            realized_pnl: 실현손익
+            realized_pnl_rate: 실현손익률
+            stock_metadata: 종목 메타데이터
+            trade_info: 거래 정보
+            get_current_market_phase_func: 현재 시장 단계 조회 함수
+            
+        Returns:
+            저장된 레코드 ID
+        """
+        try:
+            from utils.korean_time import now_kst
+            
+            # 보유 시간 계산
+            holding_minutes = 0
+            buy_time = trade_info.get('execution_time') or trade_info.get('buy_order_time')
+            if buy_time:
+                holding_minutes = (now_kst() - buy_time).total_seconds() / 60
+            
+            order_data = {
+                'stock_code': stock_code,
+                'stock_name': stock_metadata.get('stock_name', ''),
+                'order_time': trade_info.get('sell_order_time', now_kst()),
+                'execution_time': now_kst(),  # 실제 체결 시점
+                'order_id': trade_info.get('sell_order_id', ''),
+                'order_orgno': trade_info.get('sell_order_orgno', ''),
+                'order_status': 'executed',  # 체결 완료
+                'order_price': exec_price,
+                'execution_price': exec_price,
+                'quantity': exec_qty,
+                'total_amount': exec_price * exec_qty,
+                'profit_loss': realized_pnl,
+                'profit_loss_rate': realized_pnl_rate,
+                'holding_minutes': holding_minutes,
+                'sell_reason': trade_info.get('sell_reason', 'execution_notice'),
+                'sell_criteria': {'reason': trade_info.get('sell_reason', 'execution_notice'), 
+                                'market_phase': get_current_market_phase_func()},
+                'market_phase': get_current_market_phase_func(),
+                'buy_order_id': None  # 추후 매칭 로직 추가 가능
+            }
+            
+            db_id = self.save_sell_order(order_data)
+            if db_id > 0:
+                logger.info(f"📊 매도 체결 DB 저장 완료: {stock_code} (ID: {db_id})")
+            else:
+                logger.warning(f"⚠️ 매도 체결 DB 저장 실패: {stock_code}")
+            
+            return db_id
+            
+        except Exception as e:
+            logger.error(f"❌ 매도 체결 DB 저장 오류 {stock_code}: {e}")
             return 0
     
     # === 분석 및 통계 메서드들 ===
