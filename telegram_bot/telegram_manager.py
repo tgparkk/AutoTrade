@@ -118,6 +118,12 @@ class TelegramBot:
             self.application.add_handler(CommandHandler("resume", self._handle_resume))
             self.application.add_handler(CommandHandler("stop", self._handle_stop))
             
+            # 🆕 데이터베이스 관련 명령어들
+            self.application.add_handler(CommandHandler("db_summary", self._handle_db_summary))
+            self.application.add_handler(CommandHandler("db_today", self._handle_db_today))
+            self.application.add_handler(CommandHandler("db_performance", self._handle_db_performance))
+            self.application.add_handler(CommandHandler("db_scans", self._handle_db_scans))
+            
             # 도움말
             self.application.add_handler(CommandHandler("help", self._handle_help))
             self.application.add_handler(CommandHandler("start", self._handle_help))
@@ -465,6 +471,12 @@ class TelegramBot:
 /positions - 보유 포지션
 /trades - 최근 거래 내역
 
+📊 <b>데이터베이스 조회</b>
+/db_summary - 일일 거래 요약
+/db_today - 오늘 거래 현황
+/db_performance - 성과 분석
+/db_scans - 스캔 결과 조회
+
 ⚙️ <b>제어</b>
 /pause - 모니터링 일시정지
 /resume - 모니터링 재개
@@ -493,3 +505,159 @@ class TelegramBot:
             "매도완료": "⚫"
         }
         return status_map.get(status.value if hasattr(status, 'value') else str(status), "❓")
+    
+    async def _handle_db_summary(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """데이터베이스 일일 요약 조회"""
+        try:
+            if not self._check_authorized_user(update):
+                return
+            
+            # TradeExecutor의 데이터베이스 접근
+            if self.trade_manager and hasattr(self.trade_manager, 'trade_executor'):
+                database = getattr(self.trade_manager.trade_executor, 'database', None)
+                
+                if database:
+                    summary = database.get_daily_summary()
+                    
+                    if summary:
+                        message = f"""
+📊 <b>일일 거래 요약</b> ({summary.get('trade_date', 'N/A')})
+
+💰 <b>손익 현황</b>
+• 총 손익: {summary.get('total_profit_loss', 0):+,.0f}원
+• 승리 거래: {summary.get('win_count', 0)}건
+• 손실 거래: {summary.get('loss_count', 0)}건
+• 승률: {summary.get('win_rate', 0):.1f}%
+
+📈 <b>주문 현황</b>
+• 매수 주문: {summary.get('total_buy_orders', 0)}건
+• 매도 주문: {summary.get('total_sell_orders', 0)}건
+• 총 거래: {summary.get('total_trades', 0)}건
+                        """
+                    else:
+                        message = "📊 오늘 거래 데이터가 없습니다."
+                else:
+                    message = "⚠️ 데이터베이스에 연결되지 않았습니다."
+            else:
+                message = "⚠️ TradeManager가 설정되지 않았습니다."
+            
+            await update.message.reply_text(message, parse_mode='HTML')
+            
+        except Exception as e:
+            logger.error(f"DB 요약 조회 오류: {e}")
+            await update.message.reply_text("❌ 데이터베이스 조회 중 오류가 발생했습니다.")
+    
+    async def _handle_db_today(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """오늘 거래 현황 조회"""
+        try:
+            if not self._check_authorized_user(update):
+                return
+            
+            message = "📅 <b>오늘 거래 현황</b>\n\n"
+            
+            # 현재 포지션 정보
+            if self.trade_manager and hasattr(self.trade_manager, 'stock_manager'):
+                positions = self.trade_manager.stock_manager.get_all_positions()
+                bought_positions = [p for p in positions if p.status.value == "매수완료"]
+                
+                message += f"🔍 관찰 중인 종목: {len(positions)}개\n"
+                message += f"💼 보유 포지션: {len(bought_positions)}개\n\n"
+                
+                if bought_positions:
+                    message += "<b>보유 종목:</b>\n"
+                    for pos in bought_positions[:5]:  # 최대 5개만 표시
+                        unrealized_pnl = pos.unrealized_pnl or 0
+                        pnl_emoji = "🟢" if unrealized_pnl >= 0 else "🔴"
+                        message += f"• {pos.stock_code}[{pos.stock_name}]: {pnl_emoji} {unrealized_pnl:+,.0f}원\n"
+                    
+                    if len(bought_positions) > 5:
+                        message += f"... 외 {len(bought_positions) - 5}개\n"
+            
+            await update.message.reply_text(message, parse_mode='HTML')
+            
+        except Exception as e:
+            logger.error(f"오늘 거래 현황 조회 오류: {e}")
+            await update.message.reply_text("❌ 거래 현황 조회 중 오류가 발생했습니다.")
+    
+    async def _handle_db_performance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """성과 분석 조회"""
+        try:
+            if not self._check_authorized_user(update):
+                return
+            
+            if self.trade_manager and hasattr(self.trade_manager, 'trade_executor'):
+                trade_stats = self.trade_manager.trade_executor.get_trade_statistics()
+                
+                message = f"""
+📈 <b>성과 분석</b>
+
+💰 <b>전체 성과</b>
+• 총 거래 수: {trade_stats.get('total_trades', 0)}건
+• 승률: {trade_stats.get('win_rate', 0):.1f}%
+• 총 실현 손익: {trade_stats.get('total_realized_pnl', 0):+,.0f}원
+• 평균 거래당 손익: {trade_stats.get('avg_pnl_per_trade', 0):+,.0f}원
+
+📊 <b>거래 분석</b>
+• 승리 거래: {trade_stats.get('winning_trades', 0)}건
+• 손실 거래: {trade_stats.get('losing_trades', 0)}건
+• 최대 연승: {trade_stats.get('max_consecutive_wins', 0)}건
+• 최대 연패: {trade_stats.get('max_consecutive_losses', 0)}건
+                """
+            else:
+                message = "⚠️ 거래 통계를 조회할 수 없습니다."
+            
+            await update.message.reply_text(message, parse_mode='HTML')
+            
+        except Exception as e:
+            logger.error(f"성과 분석 조회 오류: {e}")
+            await update.message.reply_text("❌ 성과 분석 조회 중 오류가 발생했습니다.")
+    
+    async def _handle_db_scans(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """스캔 결과 조회"""
+        try:
+            if not self._check_authorized_user(update):
+                return
+            
+            message = "🔍 <b>스캔 결과</b>\n\n"
+            
+            # 현재 선정된 종목들 표시
+            if self.trade_manager and hasattr(self.trade_manager, 'stock_manager'):
+                selected_stocks = self.trade_manager.stock_manager.get_all_selected_stocks()
+                
+                if selected_stocks:
+                    message += f"📊 선정된 종목: {len(selected_stocks)}개\n\n"
+                    
+                    for i, stock in enumerate(selected_stocks[:10], 1):  # 최대 10개
+                        score = getattr(stock, 'total_pattern_score', 0)
+                        current_price = stock.realtime_data.current_price
+                        status = stock.status.value
+                        status_emoji = self._get_status_emoji(status)
+                        
+                        message += f"{i}. {stock.stock_code}[{stock.stock_name}]\n"
+                        message += f"   점수: {score:.1f}, 현재가: {current_price:,}원\n"
+                        message += f"   상태: {status_emoji} {status}\n\n"
+                    
+                    if len(selected_stocks) > 10:
+                        message += f"... 외 {len(selected_stocks) - 10}개"
+                else:
+                    message += "선정된 종목이 없습니다."
+            else:
+                message += "⚠️ StockManager를 찾을 수 없습니다."
+            
+            await update.message.reply_text(message, parse_mode='HTML')
+            
+        except Exception as e:
+            logger.error(f"스캔 결과 조회 오류: {e}")
+            await update.message.reply_text("❌ 스캔 결과 조회 중 오류가 발생했습니다.")
+    
+    def _check_authorized_user(self, update) -> bool:
+        """사용자 권한 확인"""
+        if not update or not update.message:
+            return False
+        
+        chat_id = update.message.chat_id
+        if str(chat_id) != str(self.chat_id):
+            logger.warning(f"⚠️ 권한 없는 사용자: {chat_id}")
+            return False
+        
+        return True

@@ -13,6 +13,14 @@ from utils.korean_time import now_kst
 from utils.logger import setup_logger
 from utils import get_trading_config_loader
 
+# 🆕 데이터베이스 저장 기능 추가
+try:
+    from database.trade_database import TradeDatabase
+    DATABASE_AVAILABLE = True
+except ImportError:
+    TradeDatabase = None
+    DATABASE_AVAILABLE = False
+
 logger = setup_logger(__name__)
 
 
@@ -81,7 +89,34 @@ class MarketScanner:
         self.volume_min_threshold = self.strategy_config.get('volume_min_threshold', 100000)
         self.top_stocks_count = 15  # 상위 15개 종목 선정
         
+        # 🆕 데이터베이스는 싱글톤 패턴으로 필요시 생성
+        logger.info("✅ MarketScanner 초기화 완료 (데이터베이스는 필요시 생성)")
+        
         logger.info("MarketScanner 초기화 완료")
+    
+    def _get_database(self):
+        """데이터베이스 인스턴스 반환 (싱글톤 패턴)"""
+        if not hasattr(self, '_database_instance'):
+            if not DATABASE_AVAILABLE:
+                logger.warning("데이터베이스 라이브러리 없음")
+                return None
+            
+            import sys
+            import os
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.dirname(current_dir)
+            if project_root not in sys.path:
+                sys.path.append(project_root)
+            
+            try:
+                from database.trade_database import TradeDatabase
+                self._database_instance = TradeDatabase()
+                logger.debug("MarketScanner 데이터베이스 인스턴스 생성")
+            except Exception as e:
+                logger.error(f"MarketScanner 데이터베이스 생성 실패: {e}")
+                self._database_instance = None
+        
+        return self._database_instance
     
     def set_websocket_manager(self, websocket_manager: "KISWebSocketManager"):
         """웹소켓 매니저 설정
@@ -763,6 +798,55 @@ class MarketScanner:
         
         return min(total_score, 100)  # 최대 100점
     
+    def get_stock_detailed_analysis(self, stock_code: str) -> Optional[Dict]:
+        """종목 상세 분석 정보 조회 (기술적 지표 포함)
+        
+        Args:
+            stock_code: 종목코드
+            
+        Returns:
+            상세 분석 결과 딕셔너리 또는 None
+        """
+        try:
+            # OHLCV 데이터 조회
+            from api.kis_market_api import get_ohlcv_data
+            
+            ohlcv_data = get_ohlcv_data(
+                itm_no=stock_code,
+                period="D",  # 일봉
+                adj_org_cls="1",  # 수정주가
+                period_cnt=30  # 30일
+            )
+            
+            if ohlcv_data is None or len(ohlcv_data) < 20:
+                logger.debug(f"OHLCV 데이터 부족: {stock_code}")
+                return None
+            
+            # 기본 분석 수행
+            fundamentals = self._calculate_real_fundamentals(stock_code, ohlcv_data)
+            if not fundamentals:
+                return None
+            
+            # 캔들 패턴 분석
+            pattern_analysis = self._analyze_real_candle_patterns(stock_code, ohlcv_data)
+            
+            # 이격도 분석
+            divergence_analysis = self._get_divergence_analysis(stock_code, ohlcv_data)
+            
+            return {
+                'pattern_score': pattern_analysis.get('total_score', 0) if pattern_analysis else 0,
+                'pattern_names': pattern_analysis.get('detected_patterns', []) if pattern_analysis else [],
+                'rsi': fundamentals.get('rsi', 50),
+                'macd': fundamentals.get('macd_signal', 0),
+                'sma_20': divergence_analysis.get('sma_20', 0) if divergence_analysis else 0,
+                'volume_increase_rate': fundamentals.get('volume_increase_rate', 1.0),
+                'price_change_rate': fundamentals.get('price_change_rate', 0)
+            }
+            
+        except Exception as e:
+            logger.debug(f"종목 상세 분석 실패 {stock_code}: {e}")
+            return None
+
     def get_stock_basic_info(self, stock_code: str) -> Optional[Dict]:
         """종목 기본 정보 조회 (실제 API 사용)
         
@@ -901,6 +985,42 @@ class MarketScanner:
                 
                 if success:
                     success_count += 1
+                    
+                    # 🆕 데이터베이스에 장전 스캔 결과 저장
+                    database = self._get_database()
+                    if database:
+                        try:
+                            # 종목 상세 정보 조회 (기술적 지표 포함)
+                            detailed_info = self.get_stock_detailed_analysis(stock_code)
+                            
+                            scan_data = {
+                                'stock_code': stock_code,
+                                'stock_name': stock_info['stock_name'],
+                                'selection_score': score,
+                                'selection_criteria': {
+                                    'scan_type': 'pre_market',
+                                    'volume_threshold': self.volume_increase_threshold,
+                                    'min_volume': self.volume_min_threshold,
+                                    'comprehensive_score': score
+                                },
+                                'pattern_score': detailed_info.get('pattern_score', 0) if detailed_info else 0,
+                                'pattern_names': detailed_info.get('pattern_names', []) if detailed_info else [],
+                                'rsi': detailed_info.get('rsi', 50) if detailed_info else 50,
+                                'macd': detailed_info.get('macd', 0) if detailed_info else 0,
+                                'sma_20': detailed_info.get('sma_20', stock_info['current_price']) if detailed_info else stock_info['current_price'],
+                                'yesterday_close': stock_info['yesterday_close'],
+                                'yesterday_volume': stock_info['yesterday_volume'],
+                                'market_cap': stock_info['market_cap']
+                            }
+                            
+                            db_id = database.save_pre_market_scan(scan_data)
+                            if db_id > 0:
+                                logger.debug(f"📊 장전 스캔 DB 저장 완료: {stock_code} (ID: {db_id})")
+                            else:
+                                logger.warning(f"⚠️ 장전 스캔 DB 저장 실패: {stock_code}")
+                                
+                        except Exception as db_error:
+                            logger.error(f"❌ 장전 스캔 DB 저장 오류 {stock_code}: {db_error}")
                     
                     # 🆕 웹소켓에 종목 구독 (실시간 데이터 수신용)
                     if self.websocket_manager:

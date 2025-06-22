@@ -18,6 +18,14 @@ from utils.korean_time import now_kst
 from utils.logger import setup_logger
 from utils import get_trading_config_loader
 
+# 🆕 데이터베이스 저장 기능 추가
+try:
+    from database.trade_database import TradeDatabase
+    DATABASE_AVAILABLE = True
+except ImportError:
+    TradeDatabase = None
+    DATABASE_AVAILABLE = False
+
 logger = setup_logger(__name__)
 
 
@@ -54,6 +62,18 @@ class TradeExecutor:
         self.last_price_cache = {}
         self.max_position_size = self.risk_config.get('max_position_size', 1000000)  # 최대 포지션 크기
         self.emergency_stop = False  # 비상 정지 플래그
+        
+        # 🆕 데이터베이스 초기화
+        self.database = None
+        if DATABASE_AVAILABLE:
+            try:
+                self.database = TradeDatabase()
+                logger.info("✅ 거래 데이터베이스 연결 완료")
+            except Exception as e:
+                logger.warning(f"⚠️ 거래 데이터베이스 연결 실패: {e}")
+                self.database = None
+        else:
+            logger.info("📊 데이터베이스 라이브러리 없음 - 메모리에만 저장")
         
         logger.info("TradeExecutor 초기화 완료 (장시간 최적화 버전)")
     
@@ -175,6 +195,9 @@ class TradeExecutor:
             current_hour = now_kst().hour
             self.hourly_trades[current_hour] += 1
             
+            # 🔥 주문 단계에서는 DB 저장하지 않음 (체결 시점에 저장)
+            # 실제 체결은 _handle_buy_execution에서 처리
+            
             logger.info(f"✅ 매수 주문 실행 완료: {stock.stock_code} {quantity}주 @{price:,}원 "
                        f"주문번호: {actual_order_id}, 거래소코드: {krx_orgno} "
                        f"(손절: {stock.stop_loss_price:,.0f}, 익절: {stock.target_price:,.0f}) "
@@ -245,6 +268,25 @@ class TradeExecutor:
             logger.debug(f"시장 변동성 조회 실패, 기본값 사용: {e}")
         
         return base_rate
+    
+    def _get_current_market_phase(self) -> str:
+        """현재 시장 단계 반환"""
+        from datetime import time as dt_time
+        
+        current_time = now_kst().time()
+        
+        if current_time <= dt_time(9, 30):
+            return 'opening'
+        elif current_time <= dt_time(12, 0):
+            return 'active'
+        elif current_time <= dt_time(13, 0):
+            return 'lunch'
+        elif current_time <= dt_time(14, 50):
+            return 'active'
+        elif current_time <= dt_time(15, 0):
+            return 'pre_close'
+        else:
+            return 'closing'
     
     def _get_market_volatility(self) -> float:
         """시장 변동성 계산 (KOSPI 기준)
@@ -461,6 +503,9 @@ class TradeExecutor:
             # 시간대별 거래 수 증가
             current_hour = now_kst().hour
             self.hourly_trades[current_hour] += 1
+            
+            # 🔥 주문 단계에서는 DB 저장하지 않음 (체결 시점에 저장)
+            # 실제 체결은 _handle_sell_execution에서 처리
             
             logger.info(f"✅ 매도 주문 실행 완료: {stock.stock_code} {sell_quantity}주 @{price:,}원 "
                        f"주문번호: {actual_order_id}, 거래소코드: {krx_orgno} (사유: {reason}) "

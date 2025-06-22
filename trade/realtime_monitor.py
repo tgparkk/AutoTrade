@@ -663,6 +663,15 @@ class RealTimeMonitor:
                     
                     logger.info(f"  {i}. {stock_code}[{stock_name}] - 점수:{score:.1f} ({reasons})")
                     
+                    # 🔥 장중 스캔 결과를 데이터베이스에 저장
+                    database = self.stock_manager._get_database()
+                    if database:
+                        db_id = database.save_intraday_scan_result(stock_code, stock_name, score, reasons)
+                        if db_id > 0:
+                            logger.debug(f"📊 장중 스캔 결과 DB 저장: {stock_code} (ID: {db_id})")
+                        else:
+                            logger.warning(f"⚠️ 장중 스캔 결과 DB 저장 실패: {stock_code}")
+                    
                     # StockManager에 장중 종목 추가 (스레드 안전)
                     success = self._add_intraday_stock_safely(stock_code, stock_name, score, reasons)
                     
