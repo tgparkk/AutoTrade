@@ -562,18 +562,62 @@ class StockManager:
         return stocks
     
     def get_stocks_by_status(self, status: StockStatus) -> List[Stock]:
-        """특정 상태의 종목들 반환"""
-        stocks = []
+        """특정 상태의 종목들 반환 (락 최적화 버전)"""
+        try:
+            # 🔥 락 순서 일관성 보장: status → 배치 조회
+            with self._status_lock:
+                matching_codes = [code for code, s in self.trading_status.items() if s == status]
+            
+            # 빈 리스트면 조기 반환 (락 없이)
+            if not matching_codes:
+                return []
+            
+            # 🔥 배치 조회로 락 경합 최소화
+            stocks = []
+            for stock_code in matching_codes:
+                stock = self.get_selected_stock(stock_code)
+                if stock:
+                    stocks.append(stock)
+            
+            return stocks
+            
+        except Exception as e:
+            logger.error(f"상태별 종목 조회 오류 {status.value}: {e}")
+            return []
+    
+    def get_stocks_by_status_batch(self, statuses: List[StockStatus]) -> Dict[StockStatus, List[Stock]]:
+        """여러 상태의 종목들을 배치로 조회 (락 경합 최소화)
         
-        with self._status_lock:
-            matching_codes = [code for code, s in self.trading_status.items() if s == status]
+        Args:
+            statuses: 조회할 상태 리스트
+            
+        Returns:
+            상태별 종목 딕셔너리
+        """
+        result = {status: [] for status in statuses}
         
-        for stock_code in matching_codes:
-            stock = self.get_selected_stock(stock_code)
-            if stock:
-                stocks.append(stock)
-        
-        return stocks
+        try:
+            # 🔥 한 번의 락으로 모든 상태 조회
+            with self._status_lock:
+                status_mapping = {}
+                for code, stock_status in self.trading_status.items():
+                    if stock_status in statuses:
+                        if stock_status not in status_mapping:
+                            status_mapping[stock_status] = []
+                        status_mapping[stock_status].append(code)
+            
+            # 🔥 배치 조회로 락 경합 최소화
+            for status, codes in status_mapping.items():
+                for stock_code in codes:
+                    stock = self.get_selected_stock(stock_code)
+                    if stock:
+                        result[status].append(stock)
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"배치 상태별 종목 조회 오류: {e}")
+            return result
     
     # === 실시간 업데이트 (성능 최적화) ===
     

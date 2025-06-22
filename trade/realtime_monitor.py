@@ -300,10 +300,8 @@ class RealTimeMonitor:
         market_phase = self.get_market_phase()
         return self.condition_analyzer.analyze_sell_conditions(stock, realtime_data, market_phase)
     
-
-    
     def process_buy_ready_stocks(self) -> Dict[str, int]:
-        """매수 준비 상태 종목들 처리 (웹소켓 기반)
+        """매수 준비 상태 종목들 처리 (락 최적화 버전)
         
         Returns:
             처리 결과 딕셔너리 {'checked': 확인한 종목 수, 'signaled': 신호 발생 수, 'ordered': 주문 접수 수}
@@ -311,47 +309,67 @@ class RealTimeMonitor:
         result = {'checked': 0, 'signaled': 0, 'ordered': 0}
         
         try:
-            # 선정된 종목들 중 매수 준비 상태인 것들 조회
-            ready_stocks = self.stock_manager.get_stocks_by_status(StockStatus.WATCHING)
+            # 🔥 배치 처리로 락 경합 최소화 - 한 번에 두 상태 조회
+            from models.stock import StockStatus
+            batch_stocks = self.stock_manager.get_stocks_by_status_batch([
+                StockStatus.WATCHING, 
+                StockStatus.BOUGHT
+            ])
             
+            ready_stocks = batch_stocks[StockStatus.WATCHING]
+            current_positions_count = len(batch_stocks[StockStatus.BOUGHT])
+            
+            # 빈 리스트면 조기 반환
+            if not ready_stocks:
+                return result
+            
+            # 🔥 실시간 데이터를 배치로 미리 수집 (락 경합 방지)
+            stock_realtime_data = {}
+            for stock in ready_stocks:
+                try:
+                    realtime_data = self.get_realtime_data(stock.stock_code)
+                    if realtime_data:
+                        stock_realtime_data[stock.stock_code] = realtime_data
+                except Exception as e:
+                    logger.debug(f"실시간 데이터 조회 실패 {stock.stock_code}: {e}")
+                    continue
+            
+            # 🔥 매수 조건 분석 및 주문 실행 (락 최적화)
             for stock in ready_stocks:
                 result['checked'] += 1
                 
+                realtime_data = stock_realtime_data.get(stock.stock_code)
+                if not realtime_data:
+                    continue
+                
                 try:
-                    # 🔥 웹소켓 실시간 데이터 조회 (API 호출 대신)
-                    realtime_data = self.get_realtime_data(stock.stock_code)
-                    
-                    if not realtime_data:
-                        continue
-                    
-                    # 매수 조건 확인
+                    # 매수 조건 확인 (TradingConditionAnalyzer 내부에서 락 최적화됨)
                     if self.analyze_buy_conditions(stock, realtime_data):
                         result['signaled'] += 1
                         
-                        # 매수량 계산
+                        # 매수량 계산 (락 없는 계산)
                         buy_quantity = self.calculate_buy_quantity(stock)
                         
                         if buy_quantity > 0:
-                            # 매수 주문 실행
-                            current_positions = len(self.stock_manager.get_stocks_by_status(StockStatus.BOUGHT))
+                            # 🔥 매수 주문 실행 (TradeExecutor 내부에서 상태 변경)
                             success = self.trade_executor.execute_buy_order(
                                 stock=stock,
                                 price=realtime_data['current_price'],
                                 quantity=buy_quantity,
-                                current_positions_count=current_positions
+                                current_positions_count=current_positions_count
                             )
                             
                             if success:
-                                # 주문 접수 성공 - 체결은 별도로 웹소켓 체결통보에서 처리
                                 result['ordered'] += 1
-                                self._buy_orders_executed += 1  # 클래스 통계 업데이트
+                                
+                                # 🔥 원자적 통계 업데이트 (스레드 안전)
+                                with self._stats_lock:
+                                    self._buy_orders_executed += 1
                                 
                                 logger.info(f"📝 매수 주문 접수: {stock.stock_code} "
                                            f"{buy_quantity}주 @{realtime_data['current_price']:,}원 "
                                            f"- 체결 대기 중 (웹소켓 체결통보 대기)")
-                                
                             else:
-                                # 주문 접수 실패
                                 logger.error(f"❌ 매수 주문 접수 실패: {stock.stock_code} "
                                             f"{buy_quantity}주 @{realtime_data['current_price']:,}원")
                         
@@ -366,7 +384,7 @@ class RealTimeMonitor:
             return result
     
     def process_sell_ready_stocks(self) -> Dict[str, int]:
-        """매도 준비 상태 종목들 처리 (웹소켓 기반)
+        """매도 준비 상태 종목들 처리 (락 최적화 버전)
         
         Returns:
             처리 결과 딕셔너리 {'checked': 확인한 종목 수, 'signaled': 신호 발생 수, 'ordered': 주문 접수 수}
@@ -374,27 +392,44 @@ class RealTimeMonitor:
         result = {'checked': 0, 'signaled': 0, 'ordered': 0}
         
         try:
-            # 보유 중인 종목들 조회
+            # 🔥 배치 처리로 락 경합 최소화
             holding_stocks = self.stock_manager.get_stocks_by_status(StockStatus.BOUGHT)
             
+            # 빈 리스트면 조기 반환
+            if not holding_stocks:
+                return result
+            
+            # 🔥 실시간 데이터를 배치로 미리 수집 (락 경합 방지)
+            stock_realtime_data = {}
+            for stock in holding_stocks:
+                try:
+                    realtime_data = self.get_realtime_data(stock.stock_code)
+                    if realtime_data:
+                        stock_realtime_data[stock.stock_code] = realtime_data
+                except Exception as e:
+                    logger.debug(f"실시간 데이터 조회 실패 {stock.stock_code}: {e}")
+                    continue
+            
+            # 🔥 매도 조건 분석 및 주문 실행 (락 최적화)
             for stock in holding_stocks:
                 result['checked'] += 1
                 
+                realtime_data = stock_realtime_data.get(stock.stock_code)
+                if not realtime_data:
+                    continue
+                
                 try:
-                    # 🔥 웹소켓 실시간 데이터 조회 (API 호출 대신)
-                    realtime_data = self.get_realtime_data(stock.stock_code)
-                    
-                    if not realtime_data:
-                        continue
-                    
-                    # 매도 조건 확인
+                    # 매도 조건 확인 (TradingConditionAnalyzer 내부에서 락 최적화됨)
                     sell_reason = self.analyze_sell_conditions(stock, realtime_data)
                     
                     if sell_reason:
                         result['signaled'] += 1
-                        self._sell_signals_detected += 1
                         
-                        # 매도 주문 실행
+                        # 🔥 원자적 통계 업데이트 (스레드 안전)
+                        with self._stats_lock:
+                            self._sell_signals_detected += 1
+                        
+                        # 🔥 매도 주문 실행 (TradeExecutor 내부에서 상태 변경)
                         success = self.trade_executor.execute_sell_order(
                             stock=stock,
                             price=realtime_data['current_price'],
@@ -402,11 +437,13 @@ class RealTimeMonitor:
                         )
                         
                         if success:
-                            # 주문 접수 성공 - 체결은 별도로 웹소켓 체결통보에서 처리
                             result['ordered'] += 1
-                            self._sell_orders_executed += 1  # 클래스 통계 업데이트
                             
-                            # 중복 알림 방지 제거
+                            # 🔥 원자적 통계 업데이트 (스레드 안전)
+                            with self._stats_lock:
+                                self._sell_orders_executed += 1
+                            
+                            # 중복 알림 방지 제거 (스레드 안전)
                             signal_key = f"{stock.stock_code}_buy"
                             self.alert_sent.discard(signal_key)
                             
@@ -414,7 +451,6 @@ class RealTimeMonitor:
                                        f"@{realtime_data['current_price']:,}원 (사유: {sell_reason}) "
                                        f"- 체결 대기 중 (웹소켓 체결통보 대기)")
                         else:
-                            # 주문 접수 실패
                             logger.error(f"❌ 매도 주문 접수 실패: {stock.stock_code} "
                                         f"@{realtime_data['current_price']:,}원 (사유: {sell_reason})")
                         
