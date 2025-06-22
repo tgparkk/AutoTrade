@@ -22,9 +22,8 @@ asyncio  # 내장 모듈
 # 텔레그램 봇 (선택사항)
 python-telegram-bot>=20.0
 
-# 기술적 분석 라이브러리
+# 기술적 분석 라이브러리 (TA-Lib 대신 ta 사용)
 ta>=0.10.2
-TA-Lib>=0.4.25
 
 # 차트/그래프 (필요시)
 matplotlib>=3.7.0
