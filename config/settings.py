@@ -26,28 +26,24 @@ class Settings:
             raise FileNotFoundError(f"설정 파일을 찾을 수 없습니다: {CONFIG_FILE}")
             
         try:
-            # INI 파일에는 섹션이 필요하므로 [DEFAULT] 섹션 추가
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            # 섹션이 없으면 [DEFAULT] 추가
-            if not content.strip().startswith('['):
-                content = '[DEFAULT]\n' + content
-                
-            self.config.read_string(content)
+            self.config.read(CONFIG_FILE, encoding='utf-8')
             print("✅ API 설정 파일 로드 완료")
             
         except Exception as e:
             print(f"❌ 설정 파일 로드 실패: {e}")
             raise
     
-    def get(self, key: str, default: str = "") -> str:
-        """설정값 가져오기"""
-        return self.config.get('DEFAULT', key, fallback=default).strip('"')
+    def get_kis(self, key: str, default: str = "") -> str:
+        """KIS 설정값 가져오기"""
+        return self.config.get('KIS', key, fallback=default).strip('"')
     
-    def get_bool(self, key: str, default: bool = False) -> bool:
-        """불린 설정값 가져오기"""
-        value = self.get(key, str(default)).lower()
+    def get_telegram(self, key: str, default: str = "") -> str:
+        """텔레그램 설정값 가져오기"""
+        return self.config.get('TELEGRAM', key, fallback=default).strip('"')
+    
+    def get_telegram_bool(self, key: str, default: bool = False) -> bool:
+        """텔레그램 불린 설정값 가져오기"""
+        value = self.get_telegram(key, str(default)).lower()
         return value in ('true', '1', 'yes', 'on')
     
     def validate_required_settings(self) -> bool:
@@ -56,7 +52,7 @@ class Settings:
         missing = []
         
         for key in required_keys:
-            value = self.get(key)
+            value = self.get_kis(key)
             if not value or value == f'your_{key.lower()}_here':
                 missing.append(key)
         
@@ -78,16 +74,16 @@ except Exception as e:
     _settings = None
 
 # KIS 한국투자증권 API 설정
-KIS_BASE_URL = _settings.get('KIS_BASE_URL', 'https://openapi.koreainvestment.com:9443') if _settings else ''
-APP_KEY = _settings.get('KIS_APP_KEY', '') if _settings else ''
-SECRET_KEY = _settings.get('KIS_APP_SECRET', '') if _settings else ''
-ACCOUNT_NUMBER = _settings.get('KIS_ACCOUNT_NO', '') if _settings else ''
+KIS_BASE_URL = _settings.get_kis('KIS_BASE_URL', 'https://openapi.koreainvestment.com:9443') if _settings else ''
+APP_KEY = _settings.get_kis('KIS_APP_KEY', '') if _settings else ''
+SECRET_KEY = _settings.get_kis('KIS_APP_SECRET', '') if _settings else ''
+ACCOUNT_NUMBER = _settings.get_kis('KIS_ACCOUNT_NO', '') if _settings else ''
 ACCOUNT_NUMBER_PREFIX = ACCOUNT_NUMBER[:8] if ACCOUNT_NUMBER else ''
-HTS_ID = _settings.get('KIS_HTS_ID', '') if _settings else ''
+HTS_ID = _settings.get_kis('KIS_HTS_ID', '') if _settings else ''
 
 # 텔레그램 봇 설정
-TELEGRAM_BOT_TOKEN = _settings.get('TELEGRAM_BOT_TOKEN', '') if _settings else ''
-TELEGRAM_CHAT_ID = _settings.get('TELEGRAM_CHAT_ID', '') if _settings else ''
+TELEGRAM_BOT_TOKEN = _settings.get_telegram('token', '') if _settings else ''
+TELEGRAM_CHAT_ID = _settings.get_telegram('chat_id', '') if _settings else ''
 
 def validate_settings():
     """필수 설정값 검증"""

@@ -54,7 +54,9 @@ class TradeManager:
         
         # 텔레그램 봇 초기화
         self.telegram_bot = None
+        logger.info("🔍 텔레그램 봇 초기화 시작...")
         self._initialize_telegram()
+        logger.info(f"🔍 텔레그램 봇 초기화 완료: {self.telegram_bot}")
         
         # 시스템 상태
         self.is_running = False
@@ -123,25 +125,34 @@ class TradeManager:
     def _initialize_telegram(self):
         """텔레그램 봇 초기화"""
         try:
+            logger.info(f"🔍 텔레그램 초기화 시작 - TELEGRAM_AVAILABLE: {TELEGRAM_AVAILABLE}")
+            
             if not TELEGRAM_AVAILABLE:
                 logger.info("텔레그램 라이브러리가 없어 텔레그램 봇을 비활성화합니다")
                 return
             
+            logger.info(f"🔍 TelegramBot 클래스: {TelegramBot}")
+            
             # 텔레그램 설정 로드
             telegram_config = self._load_telegram_config()
+            logger.info(f"🔍 텔레그램 설정 로드 결과: {telegram_config}")
             
             if telegram_config['enabled'] and TelegramBot is not None:
+                logger.info("🔍 텔레그램 봇 생성 시도...")
                 self.telegram_bot = TelegramBot(
                     token=telegram_config['token'],
                     chat_id=telegram_config['chat_id']
                 )
                 
-                logger.info("텔레그램 봇 초기화 준비 완료")
+                logger.info("✅ 텔레그램 봇 초기화 준비 완료")
+                logger.info(f"🔍 self.telegram_bot: {self.telegram_bot}")
             else:
-                logger.info("텔레그램 봇이 비활성화되어 있습니다")
+                logger.info(f"텔레그램 봇이 비활성화되어 있습니다 - enabled: {telegram_config['enabled']}, TelegramBot: {TelegramBot}")
                 
         except Exception as e:
             logger.error(f"텔레그램 봇 초기화 실패: {e}")
+            import traceback
+            logger.error(f"스택 트레이스: {traceback.format_exc()}")
             self.telegram_bot = None
     
     def _load_telegram_config(self) -> dict:
@@ -299,41 +310,97 @@ class TradeManager:
         """전체 시스템 시작 (비동기 버전)"""
         logger.info("=== AutoTrade 시스템 시작 ===")
         
+        telegram_thread = None
         try:
             self.is_running = True
             
-            # 1. 웹소켓 매니저 초기화 및 연결 (비동기 환경에서 수행)
-            logger.info("웹소켓 매니저 초기화 및 연결 시작...")
-            self.websocket_manager = await self._init_websocket_manager_async()
-            
-            # 2. MarketScanner에 웹소켓 매니저 설정
-            self.market_scanner.set_websocket_manager(self.websocket_manager)
-            logger.info("✅ MarketScanner 웹소켓 연결 설정 완료")
-            
-            # 3. 텔레그램 봇 시작 (백그라운드)
-            telegram_task = None
+            # 1. 텔레그램 봇을 별도 스레드에서 시작 (주식 로직과 완전 분리)
+            logger.info(f"🔍 텔레그램 봇 체크: self.telegram_bot = {self.telegram_bot}")
             if self.telegram_bot:
-                logger.info("텔레그램 봇 시작 중...")
-                telegram_task = asyncio.create_task(self._start_telegram_bot())
+                logger.info("텔레그램 봇을 별도 스레드에서 시작 중...")
+                
+                # TradeManager 참조 설정
+                self.telegram_bot.set_trade_manager(self)
+                
+                # 🆕 텔레그램 봇을 별도 스레드에서 실행
+                def run_telegram_bot():
+                    """텔레그램 봇 전용 스레드 함수"""
+                    try:
+                        logger.info("🔍 텔레그램 봇 스레드 시작...")
+                        
+                        # 새로운 이벤트 루프 생성 (메인 루프와 독립)
+                        import asyncio
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        
+                        # 텔레그램 봇 시작
+                        if self.telegram_bot:
+                            loop.run_until_complete(self.telegram_bot.start())
+                        
+                        # 텔레그램 봇이 실행되는 동안 유지
+                        logger.info("✅ 텔레그램 봇 스레드 실행 중...")
+                        try:
+                            loop.run_forever()
+                        except KeyboardInterrupt:
+                            logger.info("텔레그램 봇 스레드 종료 신호 수신")
+                        finally:
+                            # 정리 작업
+                            if self.telegram_bot and hasattr(self.telegram_bot, 'stop'):
+                                loop.run_until_complete(self.telegram_bot.stop())
+                            loop.close()
+                            logger.info("✅ 텔레그램 봇 스레드 정리 완료")
+                            
+                    except Exception as tg_error:
+                        logger.error(f"❌ 텔레그램 봇 스레드 실행 실패: {tg_error}")
+                        import traceback
+                        logger.error(f"스택 트레이스: {traceback.format_exc()}")
+                
+                # 데몬 스레드로 시작 (메인 프로세스 종료시 함께 종료)
+                telegram_thread = threading.Thread(
+                    target=run_telegram_bot,
+                    name="TelegramBot-Thread",
+                    daemon=True
+                )
+                telegram_thread.start()
+                
+                # 텔레그램 봇 스레드가 시작될 때까지 잠시 대기
+                await asyncio.sleep(3)
+                
+                if telegram_thread.is_alive():
+                    logger.info("✅ 텔레그램 봇 별도 스레드 시작 완료")
+                else:
+                    logger.warning("❌ 텔레그램 봇 스레드 시작 실패")
+                    
+            else:
+                logger.warning("⚠️ 텔레그램 봇이 None입니다 - 초기화되지 않았음")
             
-            # 5. 메인 루프 실행 (모든 로직은 여기서 주기적으로 처리)
-            logger.info("메인 루프 시작 - 주기적 시장 스캔 및 매매 대기")
+            # 2. 웹소켓 매니저 초기화 및 연결 (비동기 환경에서 수행)
+            try:
+                logger.info("웹소켓 매니저 초기화 및 연결 시작...")
+                self.websocket_manager = await self._init_websocket_manager_async()
+                
+                # MarketScanner에 웹소켓 매니저 설정
+                self.market_scanner.set_websocket_manager(self.websocket_manager)
+                logger.info("✅ MarketScanner 웹소켓 연결 설정 완료")
+                
+            except Exception as ws_error:
+                logger.error(f"❌ 웹소켓 초기화 실패: {ws_error}")
+                logger.warning("⚠️ 웹소켓 없이 시스템을 계속 실행합니다 (제한된 기능)")
+                # 웹소켓 실패해도 시스템은 계속 실행
+                self.websocket_manager = None
+            
+            # 3. 메인 루프 실행 (주식 매매 로직만 처리)
+            logger.info("메인 루프 시작 - 주기적 시장 스캔 및 매매 대기 (텔레그램 봇과 독립 실행)")
             await self._main_loop()
             
         except Exception as e:
             logger.error(f"시스템 시작 오류: {e}")
             raise
         finally:
-            if telegram_task and not telegram_task.done():
-                telegram_task.cancel()
-    
-    async def _start_telegram_bot(self):
-        """텔레그램 봇 시작 (비동기)"""
-        try:
-            if self.telegram_bot and hasattr(self.telegram_bot, 'start'):
-                await self.telegram_bot.start()
-        except Exception as e:
-            logger.error(f"텔레그램 봇 시작 실패: {e}")
+            # 텔레그램 스레드 정리는 자동으로 처리됨 (daemon=True)
+            if telegram_thread and telegram_thread.is_alive():
+                logger.info("텔레그램 봇 스레드 종료 대기 중...")
+                # 데몬 스레드이므로 자동으로 종료됨
     
     async def _main_loop(self):
         """메인 실행 루프 - 간소화된 버전"""
@@ -405,7 +472,7 @@ class TradeManager:
         if hasattr(self, '_test_scan_completed'):
             return
         
-        logger.info("🧪 테스트 모드: stock_list.json 기반 종목 분석 시작")
+        logger.info("🔍 테스트 모드: stock_list.json 기반 종목 분석 시작")
         
         # API 인증
         try:

@@ -64,6 +64,7 @@ class KISWebSocketConnection:
                 "secretkey": kis.get_app_secret()
             }
 
+            # 동기 requests 사용 (asyncio 내에서도 작동)
             response = requests.post(url, headers=headers, json=body, timeout=10)
 
             if response.status_code == 200:
