@@ -48,12 +48,13 @@ class RealTimeMonitor:
         # 설정 로드
         self.config_loader = get_trading_config_loader()
         self.strategy_config = self.config_loader.load_trading_strategy_config()
+        self.performance_config = self.config_loader.load_performance_config()  # 🆕 성능 설정 추가
         self.market_config = self.config_loader.load_market_schedule_config()
         self.risk_config = self.config_loader.load_risk_management_config()
         
         # 🔥 설정 기반 모니터링 주기 (하드코딩 제거)
-        self.fast_monitoring_interval = self.strategy_config.get('fast_monitoring_interval', 3)
-        self.normal_monitoring_interval = self.strategy_config.get('normal_monitoring_interval', 10)
+        self.fast_monitoring_interval = self.performance_config.get('fast_monitoring_interval', 3)
+        self.normal_monitoring_interval = self.performance_config.get('normal_monitoring_interval', 10)
         self.current_monitoring_interval = self.fast_monitoring_interval
         
         # 모니터링 상태
@@ -101,9 +102,8 @@ class RealTimeMonitor:
         
         # 🔥 설정 기반 장중 추가 종목 스캔 (하드코딩 제거)
         self.last_intraday_scan_time = None
-        self.intraday_scan_interval = self.strategy_config.get('intraday_scan_interval_minutes', 30) * 60  # 분을 초로 변환
-        self.max_additional_stocks = self.strategy_config.get('max_additional_stocks', 10)
-        self.websocket_slots_minimum_reserve = self.strategy_config.get('websocket_slots_minimum_reserve', 10)
+        self.intraday_scan_interval = self.performance_config.get('intraday_scan_interval_minutes', 30) * 60  # 분을 초로 변환
+        self.max_additional_stocks = self.performance_config.get('max_intraday_selected_stocks', 10)
         
         logger.info("RealTimeMonitor 초기화 완료 (웹소켓 기반 최적화 버전 + 장중추가스캔)")
     
@@ -560,19 +560,28 @@ class RealTimeMonitor:
             market_phase = self.get_market_phase()
             
             # 장중 시간대에만 실행 (점심시간, 마감시간 제외)
-            if market_phase not in ['active']:
-                return
+            #if market_phase not in ['active']:
+            #    return
             
-            # 🔥 설정 기반 웹소켓 슬롯 여유 확인 (하드코딩 제거)
-            websocket_max = self.strategy_config.get('websocket_max_connections', 41)
-            connections_per_stock = self.strategy_config.get('websocket_connections_per_stock', 2)
-            system_connections = self.strategy_config.get('websocket_system_connections', 1)
+            # 🔥 총 관찰 종목 수 제한 확인 (웹소켓 한도 고려)
+            websocket_max = self.performance_config.get('websocket_max_connections', 41)
+            connections_per_stock = self.performance_config.get('websocket_connections_per_stock', 2)
+            system_connections = self.performance_config.get('websocket_system_connections', 1)
             
-            current_websocket_count = len(self.stock_manager.get_all_positions()) * connections_per_stock + system_connections
-            available_slots = websocket_max - current_websocket_count
+            # 현재 관리 중인 총 종목 수
+            current_total_stocks = len(self.stock_manager.get_all_positions())
+            current_websocket_count = current_total_stocks * connections_per_stock + system_connections
             
-            if available_slots < self.websocket_slots_minimum_reserve:
-                logger.debug(f"웹소켓 슬롯 부족으로 장중 스캔 생략 (사용:{current_websocket_count}/{websocket_max}, 여유:{available_slots})")
+            # 최대 관리 가능 종목 수 계산 (웹소켓 한도 기준)
+            max_manageable_stocks = (websocket_max - system_connections) // connections_per_stock
+            
+            # 설정된 최대 종목 수와 웹소켓 한도 중 작은 값 사용
+            configured_max_stocks = self.performance_config.get('max_total_observable_stocks', 20)
+            effective_max_stocks = min(configured_max_stocks, max_manageable_stocks)
+            
+            if current_total_stocks >= effective_max_stocks:
+                logger.debug(f"최대 관찰 종목 수 도달로 장중 스캔 생략 (현재:{current_total_stocks}/{effective_max_stocks}, "
+                           f"웹소켓:{current_websocket_count}/{websocket_max})")
                 return
             
             # 30분 간격 체크
@@ -582,120 +591,172 @@ class RealTimeMonitor:
                 if current_time.hour >= 10:
                     should_scan = True
             else:
-                # 마지막 스캔으로부터 30분 경과 체크
+                # 마지막 스캔으로부터 intraday_scan_interval 분 경과 체크
                 time_elapsed = (current_time - self.last_intraday_scan_time).total_seconds()
                 if time_elapsed >= self.intraday_scan_interval:
                     should_scan = True
             
             if should_scan:
-                logger.info(f"🔍 장중 추가 종목 스캔 실행 (웹소켓 여유:{available_slots}개)")
+                # 추가 가능한 종목 수 계산
+                remaining_slots = effective_max_stocks - current_total_stocks
+                max_new_stocks = min(self.max_additional_stocks, remaining_slots)
                 
-                # MarketScanner 인스턴스 생성 및 장중 스캔 실행
-                from trade.market_scanner import MarketScanner
-                market_scanner = MarketScanner(self.stock_manager)
+                logger.info(f"🔍 장중 추가 종목 스캔 시작 (백그라운드 실행, 추가가능:{max_new_stocks}개)")
                 
-                additional_stocks = market_scanner.intraday_scan_additional_stocks(
-                    max_stocks=min(self.max_additional_stocks, available_slots // 2)
+                # 🔥 백그라운드 스레드에서 비동기 실행 (메인 루프 블로킹 방지)
+                import threading
+                
+                def background_intraday_scan():
+                    """백그라운드에서 장중 스캔 실행"""
+                    try:
+                        logger.debug(f"백그라운드 장중 스캔 스레드 시작 (PID: {threading.current_thread().ident})")
+                        
+                        # MarketScanner 인스턴스 생성 및 장중 스캔 실행
+                        from trade.market_scanner import MarketScanner
+                        market_scanner = MarketScanner(self.stock_manager)
+                        
+                        additional_stocks = market_scanner.intraday_scan_additional_stocks(
+                            max_stocks=max_new_stocks
+                        )
+                        
+                        # 결과 처리는 메인 스레드에서 안전하게 처리
+                        self._process_intraday_scan_results(additional_stocks)
+                        
+                    except Exception as e:
+                        logger.error(f"백그라운드 장중 스캔 오류: {e}")
+                
+                # 백그라운드 스레드 시작
+                scan_thread = threading.Thread(
+                    target=background_intraday_scan,
+                    name=f"IntradayScan-{current_time.strftime('%H%M%S')}",
+                    daemon=True  # 메인 프로세스 종료시 함께 종료
                 )
+                scan_thread.start()
                 
-                if additional_stocks:
-                    logger.info(f"🎯 장중 추가 종목 후보 {len(additional_stocks)}개 발견:")
-                    
-                    # 실제 종목 추가 처리
-                    added_count = 0
-                    for i, (stock_code, score, reasons) in enumerate(additional_stocks, 1):
-                        from utils.stock_data_loader import get_stock_data_loader
-                        stock_loader = get_stock_data_loader()
-                        stock_name = stock_loader.get_stock_name(stock_code)
-                        
-                        logger.info(f"  {i}. {stock_code}[{stock_name}] - 점수:{score:.1f} ({reasons})")
-                        
-                        # StockManager에 장중 종목 추가
-                        try:
-                            # 현재가 조회 (KIS API 사용)
-                            from api.kis_market_api import get_inquire_price
-                            price_data = get_inquire_price(div_code="J", itm_no=stock_code)
-                            
-                            if price_data is not None and not price_data.empty:
-                                # 첫 번째 행에서 현재가 정보 추출
-                                row = price_data.iloc[0]
-                                current_price = float(row.get('stck_prpr', 0))  # 현재가
-                                
-                                if current_price > 0:
-                                    # 추가 시장 데이터 준비
-                                    market_data = {
-                                        'volume': int(row.get('acml_vol', 0)),  # 누적거래량
-                                        'high_price': float(row.get('stck_hgpr', current_price)),  # 고가
-                                        'low_price': float(row.get('stck_lwpr', current_price)),   # 저가
-                                        'open_price': float(row.get('stck_oprc', current_price)),  # 시가
-                                        'yesterday_close': float(row.get('stck_sdpr', current_price)),  # 전일종가
-                                        'price_change_rate': float(row.get('prdy_ctrt', 0.0)),  # 전일대비율
-                                        'volume_spike_ratio': 1.0  # 기본값
-                                    }
-                                    
-                                    # 종목명 안전 처리
-                                    safe_stock_name = stock_name if stock_name else f"종목{stock_code}"
-                                    
-                                    # StockManager에 장중 종목 추가
-                                    success = self.stock_manager.add_intraday_stock(
-                                        stock_code=stock_code,
-                                        stock_name=safe_stock_name,
-                                        current_price=current_price,
-                                        selection_score=score,
-                                        reasons=reasons,
-                                        market_data=market_data
-                                    )
-                                    
-                                    if success:
-                                        added_count += 1
-                                        logger.info(f"✅ 장중 종목 추가 성공: {stock_code}[{safe_stock_name}] @{current_price:,}원")
-                                        
-                                        # 🔥 웹소켓 구독 추가 (실시간 모니터링 시작)
-                                        # StockManager가 웹소켓 매니저를 가지고 있는지 확인
-                                        websocket_manager = getattr(self.stock_manager, 'websocket_manager', None)
-                                        if websocket_manager:
-                                            try:
-                                                # 호가 구독
-                                                websocket_manager.subscribe_orderbook(stock_code)
-                                                # 체결가 구독  
-                                                websocket_manager.subscribe_price(stock_code)
-                                                logger.info(f"📡 웹소켓 구독 추가: {stock_code} (호가+체결가)")
-                                            except Exception as ws_e:
-                                                logger.warning(f"웹소켓 구독 실패 {stock_code}: {ws_e}")
-                                        else:
-                                            logger.debug(f"웹소켓 매니저 없음 - 실시간 구독 생략: {stock_code}")
-                                        
-                                    else:
-                                        logger.warning(f"❌ 장중 종목 추가 실패: {stock_code}[{safe_stock_name}]")
-                                
-                                else:
-                                    logger.warning(f"⚠️ 유효하지 않은 현재가로 추가 생략: {stock_code}[{stock_name}] (가격: {current_price})")
-                            
-                            else:
-                                logger.warning(f"⚠️ 현재가 조회 실패로 추가 생략: {stock_code}[{stock_name}]")
-                                
-                        except Exception as add_e:
-                            logger.error(f"장중 종목 추가 처리 오류 {stock_code}: {add_e}")
-                            continue
-                    
-                    # 추가 결과 요약
-                    if added_count > 0:
-                        logger.info(f"🎉 장중 종목 추가 완료: {added_count}/{len(additional_stocks)}개 성공")
-                        
-                        # 장중 추가 종목 요약 출력
-                        intraday_summary = self.stock_manager.get_intraday_summary()
-                        logger.info(f"📊 장중 추가 종목 현황: 총 {intraday_summary.get('total_count', 0)}개, "
-                                   f"평균점수 {intraday_summary.get('average_score', 0):.1f}")
-                    else:
-                        logger.warning("❌ 장중 종목 추가 실패: 모든 후보 종목 추가 불가")
-                else:
-                    logger.info("📊 장중 추가 종목 스캔: 조건 만족 종목 없음")
-                
-                # 마지막 스캔 시간 업데이트
+                # 마지막 스캔 시간 즉시 업데이트 (중복 실행 방지)
                 self.last_intraday_scan_time = current_time
+                
+                logger.info(f"✅ 장중 스캔 백그라운드 시작 완료 (스레드: {scan_thread.name})")
+                
+                # 결과 처리는 _process_intraday_scan_results에서 별도 처리
+                return
                 
         except Exception as e:
             logger.error(f"장중 추가 종목 스캔 오류: {e}")
+    
+    def _process_intraday_scan_results(self, additional_stocks):
+        """장중 스캔 결과 처리 (스레드 안전)"""
+        try:
+            if not additional_stocks:
+                logger.info("📊 장중 추가 종목 스캔: 조건 만족 종목 없음")
+                return
+            
+            logger.info(f"🎯 장중 추가 종목 후보 {len(additional_stocks)}개 발견:")
+            
+            # 실제 종목 추가 처리
+            added_count = 0
+            for i, (stock_code, score, reasons) in enumerate(additional_stocks, 1):
+                try:
+                    from utils.stock_data_loader import get_stock_data_loader
+                    stock_loader = get_stock_data_loader()
+                    stock_name = stock_loader.get_stock_name(stock_code)
+                    
+                    logger.info(f"  {i}. {stock_code}[{stock_name}] - 점수:{score:.1f} ({reasons})")
+                    
+                    # StockManager에 장중 종목 추가 (스레드 안전)
+                    success = self._add_intraday_stock_safely(stock_code, stock_name, score, reasons)
+                    
+                    if success:
+                        added_count += 1
+                        logger.info(f"✅ 장중 종목 추가 성공: {stock_code}[{stock_name}]")
+                    else:
+                        logger.warning(f"❌ 장중 종목 추가 실패: {stock_code}[{stock_name}]")
+                        
+                except Exception as add_e:
+                    logger.error(f"장중 종목 추가 처리 오류 {stock_code}: {add_e}")
+                    continue
+            
+            # 추가 결과 요약
+            if added_count > 0:
+                logger.info(f"🎉 장중 종목 추가 완료: {added_count}/{len(additional_stocks)}개 성공")
+                
+                # 장중 추가 종목 요약 출력
+                intraday_summary = self.stock_manager.get_intraday_summary()
+                logger.info(f"📊 장중 추가 종목 현황: 총 {intraday_summary.get('total_count', 0)}개, "
+                           f"평균점수 {intraday_summary.get('average_score', 0):.1f}")
+            else:
+                logger.warning("❌ 장중 종목 추가 실패: 모든 후보 종목 추가 불가")
+                
+        except Exception as e:
+            logger.error(f"장중 스캔 결과 처리 오류: {e}")
+    
+    def _add_websocket_subscription_safely(self, stock_code: str):
+        """스레드 안전한 웹소켓 구독 추가"""
+        try:
+            # StockManager가 웹소켓 매니저를 가지고 있는지 확인
+            websocket_manager = getattr(self.stock_manager, 'websocket_manager', None)
+            if websocket_manager:
+                try:
+                    # 호가 구독
+                    websocket_manager.subscribe_orderbook(stock_code)
+                    # 체결가 구독  
+                    websocket_manager.subscribe_price(stock_code)
+                    logger.info(f"📡 웹소켓 구독 추가: {stock_code} (호가+체결가)")
+                except Exception as ws_e:
+                    logger.warning(f"웹소켓 구독 실패 {stock_code}: {ws_e}")
+            else:
+                logger.debug(f"웹소켓 매니저 없음 - 실시간 구독 생략: {stock_code}")
+                
+        except Exception as e:
+            logger.error(f"웹소켓 구독 추가 오류 {stock_code}: {e}")
+    
+    def _add_intraday_stock_safely(self, stock_code: str, stock_name: Optional[str], score: float, reasons: str) -> bool:
+        """스레드 안전한 장중 종목 추가"""
+        try:
+            # 종목명 안전 처리
+            safe_stock_name = stock_name if stock_name else f"종목{stock_code}"
+            
+            # 현재가 조회 (KIS API 사용)
+            from api.kis_market_api import get_inquire_price
+            price_data = get_inquire_price(div_code="J", itm_no=stock_code)
+            
+            if price_data is not None and not price_data.empty:
+                # 첫 번째 행에서 현재가 정보 추출
+                row = price_data.iloc[0]
+                current_price = float(row.get('stck_prpr', 0))  # 현재가
+                
+                if current_price > 0:
+                    # 추가 시장 데이터 준비
+                    market_data = {
+                        'volume': int(row.get('acml_vol', 0)),  # 누적거래량
+                        'high_price': float(row.get('stck_hgpr', current_price)),  # 고가
+                        'low_price': float(row.get('stck_lwpr', current_price)),   # 저가
+                        'open_price': float(row.get('stck_oprc', current_price)),  # 시가
+                        'yesterday_close': float(row.get('stck_sdpr', current_price)),  # 전일종가
+                        'price_change_rate': float(row.get('prdy_ctrt', 0.0)),  # 전일대비율
+                        'volume_spike_ratio': 1.0  # 기본값
+                    }
+                    
+                    # StockManager에 장중 종목 추가 (스레드 안전)
+                    success = self.stock_manager.add_intraday_stock(
+                        stock_code=stock_code,
+                        stock_name=safe_stock_name,
+                        current_price=current_price,
+                        selection_score=score,
+                        reasons=reasons,
+                        market_data=market_data
+                    )
+                    
+                    if success:
+                        # 🔥 웹소켓 구독 추가 (실시간 모니터링 시작)
+                        self._add_websocket_subscription_safely(stock_code)
+                        return True
+                    
+            return False
+            
+        except Exception as e:
+            logger.error(f"안전한 장중 종목 추가 실패 {stock_code}: {e}")
+            return False
     
     def stop_monitoring(self):
         """모니터링 중지"""

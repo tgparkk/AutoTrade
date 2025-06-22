@@ -35,13 +35,14 @@ class TradingConditionAnalyzer:
         # 설정 로드
         self.config_loader = get_trading_config_loader()
         self.strategy_config = self.config_loader.load_trading_strategy_config()
+        self.performance_config = self.config_loader.load_performance_config()  # 🆕 성능 설정 추가
         self.risk_config = self.config_loader.load_risk_management_config()
         
         # 🔥 설정 기반 공식 문서 기반 고급 매매 지표 임계값 (하드코딩 제거)
-        self.contract_strength_threshold = self.strategy_config.get('contract_strength_threshold', 120.0)
-        self.buy_ratio_threshold = self.strategy_config.get('buy_ratio_threshold', 60.0)
-        self.vi_activation_threshold = self.strategy_config.get('vi_activation_threshold', True)
-        self.market_pressure_weight = self.strategy_config.get('market_pressure_weight', 0.3)
+        self.contract_strength_threshold = self.performance_config.get('contract_strength_threshold', 120.0)
+        self.buy_ratio_threshold = self.performance_config.get('buy_ratio_threshold', 60.0)
+        self.vi_activation_threshold = self.performance_config.get('vi_activation_threshold', True)
+        self.market_pressure_weight = self.performance_config.get('market_pressure_weight', 0.3)
         
         logger.info("TradingConditionAnalyzer 초기화 완료")
     
@@ -88,7 +89,7 @@ class TradingConditionAnalyzer:
     
     def analyze_buy_conditions(self, stock: Stock, realtime_data: Dict, 
                               market_phase: Optional[str] = None) -> bool:
-        """매수 조건 분석 (공식 문서 기반 고급 지표 활용)
+        """매수 조건 분석 (점수 기반 현실적 시스템)
         
         Args:
             stock: 주식 객체
@@ -114,10 +115,15 @@ class TradingConditionAnalyzer:
             vi_standard_price = getattr(stock.realtime_data, 'vi_standard_price', 0)
             trading_halt = getattr(stock.realtime_data, 'trading_halt', False)
             
-            # VI 발동 및 거래정지 체크
+            # 절대 금지 조건 (거래정지, VI발동)
             if trading_halt or (vi_standard_price > 0 and self.vi_activation_threshold):
                 logger.debug(f"거래 제외: {stock.stock_code} (거래정지: {trading_halt}, VI발동: {vi_standard_price > 0})")
                 return False
+            
+            # 🔥 점수 기반 매수 조건 분석 시작
+            total_score = 0
+            max_possible_score = 100
+            condition_details = []
             
             # 🔥 설정 기반 시장 단계별 조건 조정 (하드코딩 제거)
             if market_phase == 'opening':
@@ -125,73 +131,127 @@ class TradingConditionAnalyzer:
                 price_threshold = self.strategy_config.get('opening_price_threshold', 0.015)
                 contract_strength_min = self.contract_strength_threshold * self.strategy_config.get('opening_contract_strength_multiplier', 1.2)
                 buy_ratio_min = self.buy_ratio_threshold * self.strategy_config.get('opening_buy_ratio_multiplier', 1.1)
+                min_pattern_score = self.strategy_config.get('opening_pattern_score_threshold', 75.0)
+                required_total_score = self.performance_config.get('buy_score_opening_threshold', 70)
             elif market_phase == 'pre_close':
                 volume_threshold = self.strategy_config.get('volume_increase_threshold', 2.0) * self.strategy_config.get('preclose_volume_multiplier', 2.0)
                 price_threshold = self.strategy_config.get('preclose_price_threshold', 0.02)
                 contract_strength_min = self.contract_strength_threshold * self.strategy_config.get('preclose_contract_strength_multiplier', 1.5)
                 buy_ratio_min = self.buy_ratio_threshold * self.strategy_config.get('preclose_buy_ratio_multiplier', 1.2)
+                min_pattern_score = self.strategy_config.get('opening_pattern_score_threshold', 75.0)
+                required_total_score = self.performance_config.get('buy_score_preclose_threshold', 75)
             else:
                 volume_threshold = self.strategy_config.get('volume_increase_threshold', 2.0)
                 price_threshold = self.strategy_config.get('normal_price_threshold', 0.01)
                 contract_strength_min = self.contract_strength_threshold
                 buy_ratio_min = self.buy_ratio_threshold
-            
-            # 🔥 고급 매수 조건 (공식 문서 기반)
-            
-            # 1. 기본 조건
-            volume_condition = volume_spike_ratio >= volume_threshold
-            price_condition = price_change_rate >= price_threshold
-            
-            # 2. 최소 거래량 조건
-            min_volume = self.strategy_config.get('volume_min_threshold', 100000)
-            volume_min_condition = realtime_data.get('volume', 0) >= min_volume
-            
-            # 🔥 설정 기반 패턴 점수 조건 (하드코딩 제거)
-            if market_phase == 'opening':
-                min_pattern_score = self.strategy_config.get('opening_pattern_score_threshold', 75.0)
-            else:
                 min_pattern_score = self.strategy_config.get('normal_pattern_score_threshold', 70.0)
-            pattern_condition = stock.total_pattern_score >= min_pattern_score
+                required_total_score = self.performance_config.get('buy_score_normal_threshold', 60)
             
-            # 4. 🆕 체결강도 조건 (KIS 공식 필드)
-            strength_condition = contract_strength >= contract_strength_min
+            # === 점수 계산 시작 (총 100점 만점) ===
             
-            # 5. 🆕 매수비율 조건 (KIS 공식 필드)
-            buy_ratio_condition = buy_ratio >= buy_ratio_min
+            # 1. 이격도 조건 (0~25점) - 데이트레이딩 핵심 지표 (가장 중요)
+            divergence_score, divergence_info = self._analyze_divergence_buy_score(stock, market_phase)
+            total_score += divergence_score
+            condition_details.append(f"이격도(+{divergence_score}점, {divergence_info})")
             
-            # 6. 🆕 시장압력 조건 (KIS 공식 필드)
-            market_pressure_condition = market_pressure in ['BUY', 'NEUTRAL']
+            # 2. 거래량 조건 (0~20점) - 모멘텀 확인
+            if volume_spike_ratio >= volume_threshold:
+                volume_score = min(20, int(volume_spike_ratio / volume_threshold * 15))
+                total_score += volume_score
+                condition_details.append(f"거래량(+{volume_score}점)")
+            elif volume_spike_ratio >= volume_threshold * 0.8:  # 80% 달성시 부분 점수
+                volume_score = 12
+                total_score += volume_score
+                condition_details.append(f"거래량(+{volume_score}점, 부분달성)")
             
-            # 🔥 설정 기반 호가 스프레드 조건 (하드코딩 제거)
+            # 3. 가격 상승률 조건 (0~15점)
+            if price_change_rate >= price_threshold:
+                price_score = min(15, int(price_change_rate / price_threshold * 12))
+                total_score += price_score
+                condition_details.append(f"상승률(+{price_score}점)")
+            elif price_change_rate >= price_threshold * 0.7:  # 70% 달성시 부분 점수
+                price_score = 8
+                total_score += price_score
+                condition_details.append(f"상승률(+{price_score}점, 부분달성)")
+            
+            # 4. 체결강도 조건 (0~15점)
+            if contract_strength >= contract_strength_min:
+                strength_score = min(15, int((contract_strength - contract_strength_min) / 20 + 10))
+                total_score += strength_score
+                condition_details.append(f"체결강도(+{strength_score}점)")
+            elif contract_strength >= contract_strength_min * 0.85:  # 85% 달성시 부분 점수
+                strength_score = 8
+                total_score += strength_score
+                condition_details.append(f"체결강도(+{strength_score}점, 부분달성)")
+            
+            # 5. 패턴 점수 조건 (0~10점)
+            if stock.total_pattern_score >= min_pattern_score:
+                pattern_score = min(10, int((stock.total_pattern_score - min_pattern_score) / 10 + 7))
+                total_score += pattern_score
+                condition_details.append(f"패턴(+{pattern_score}점)")
+            elif stock.total_pattern_score >= min_pattern_score * 0.8:  # 80% 달성시 부분 점수
+                pattern_score = 5
+                total_score += pattern_score
+                condition_details.append(f"패턴(+{pattern_score}점, 부분달성)")
+            
+            # 6. 매수비율 조건 (0~10점)
+            if buy_ratio >= buy_ratio_min:
+                ratio_score = min(10, int((buy_ratio - buy_ratio_min) / 10 + 7))
+                total_score += ratio_score
+                condition_details.append(f"매수비율(+{ratio_score}점)")
+            elif buy_ratio >= buy_ratio_min * 0.8:  # 80% 달성시 부분 점수
+                ratio_score = 5
+                total_score += ratio_score
+                condition_details.append(f"매수비율(+{ratio_score}점, 부분달성)")
+            
+            # 7. 최소 거래량 조건 (0~5점)
+            min_volume = self.strategy_config.get('volume_min_threshold', 100000)
+            current_volume = realtime_data.get('volume', 0)
+            if current_volume >= min_volume:
+                total_score += 5
+                condition_details.append("최소거래량(+5점)")
+            elif current_volume >= min_volume * 0.7:  # 70% 달성시 부분 점수
+                total_score += 3
+                condition_details.append("최소거래량(+3점, 부분달성)")
+            
+            # 8. 시장압력 조건 (0~5점)
+            if market_pressure == 'BUY':
+                total_score += 5
+                condition_details.append("시장압력(+5점, 매수우세)")
+            elif market_pressure == 'NEUTRAL':
+                total_score += 3
+                condition_details.append("시장압력(+3점, 중립)")
+            # SELL인 경우 0점 (감점 없음)
+            
+            # 9. 호가 스프레드 조건 (0~5점)
             bid_price = realtime_data.get('bid_price', 0)
             ask_price = realtime_data.get('ask_price', 0)
-            spread_condition = True
             if bid_price > 0 and ask_price > 0:
                 spread_rate = (ask_price - bid_price) / bid_price
                 spread_threshold = self.strategy_config.get('spread_threshold', 0.01)
-                spread_condition = spread_rate <= spread_threshold
+                if spread_rate <= spread_threshold:
+                    total_score += 5
+                    condition_details.append("호가스프레드(+5점)")
+                elif spread_rate <= spread_threshold * 2:  # 2배 이내면 부분 점수
+                    total_score += 2
+                    condition_details.append("호가스프레드(+2점, 부분달성)")
+            else:
+                total_score += 3  # 데이터 없으면 중간 점수
+                condition_details.append("호가스프레드(+3점, 데이터없음)")
             
-            # 🆕 8. 이격도 조건 (핵심 매수 타이밍 지표)
-            divergence_condition, divergence_info = self._analyze_divergence_buy_signal(
-                stock, market_phase
-            )
-            
-            # 🔥 최종 매수 신호 판단 (이격도 조건 추가)
-            buy_signal = (volume_condition and price_condition and 
-                         volume_min_condition and pattern_condition and
-                         strength_condition and buy_ratio_condition and
-                         market_pressure_condition and spread_condition and
-                         divergence_condition)
+            # === 최종 매수 신호 판단 ===
+            max_possible_score = 100  # 총점 100점으로 수정
+            buy_signal = total_score >= required_total_score
             
             if buy_signal:
                 logger.info(f"🚀 {stock.stock_code}({stock.stock_name}) 매수 신호 ({market_phase}): "
-                           f"거래량({volume_spike_ratio:.1f}배≥{volume_threshold:.1f}), "
-                           f"상승률({price_change_rate:.2%}≥{price_threshold:.1%}), "
-                           f"체결강도({contract_strength:.1f}≥{contract_strength_min:.1f}), "
-                           f"매수비율({buy_ratio:.1f}%≥{buy_ratio_min:.1f}%), "
-                           f"시장압력({market_pressure}), "
-                           f"패턴점수({stock.total_pattern_score:.1f}≥{min_pattern_score}), "
-                           f"{divergence_info}")
+                           f"총점 {total_score}/{max_possible_score}점 (기준:{required_total_score}점) "
+                           f"- {', '.join(condition_details)}")
+            else:
+                logger.debug(f"❌ {stock.stock_code} 매수 조건 미달: "
+                            f"총점 {total_score}/{max_possible_score}점 (기준:{required_total_score}점) "
+                            f"- {', '.join(condition_details)}")
             
             return buy_signal
             
@@ -199,15 +259,15 @@ class TradingConditionAnalyzer:
             logger.error(f"매수 조건 분석 오류 {stock.stock_code}: {e}")
             return False
     
-    def _analyze_divergence_buy_signal(self, stock: Stock, market_phase: str) -> Tuple[bool, str]:
-        """이격도 기반 매수 신호 분석
+    def _analyze_divergence_buy_score(self, stock: Stock, market_phase: str) -> Tuple[int, str]:
+        """이격도 기반 매수 점수 계산 (0~25점) - 데이트레이딩 핵심 지표
         
         Args:
             stock: 주식 객체
             market_phase: 시장 단계
             
         Returns:
-            (조건 충족 여부, 디버깅 정보)
+            (점수, 디버깅 정보)
         """
         try:
             current_price = stock.realtime_data.current_price
@@ -221,34 +281,80 @@ class TradingConditionAnalyzer:
                     if day_range > 0:
                         daily_pos = (current_price - stock.realtime_data.today_low) / day_range * 100
                 
-                # 🔥 설정 기반 매수 신호 판단 (하드코딩 제거)
-                if market_phase == 'opening':
-                    # 장 초반: 강한 과매도 + 저점 근처
-                    div_threshold = self.strategy_config.get('opening_divergence_threshold', -3.5)
-                    pos_threshold = self.strategy_config.get('opening_daily_position_threshold', 25)
-                    condition = (sma_20_div <= div_threshold and daily_pos <= pos_threshold)
-                elif market_phase == 'pre_close':
-                    # 마감 전: 매우 보수적 (깊은 과매도)
-                    div_threshold = self.strategy_config.get('preclose_divergence_threshold', -4.0)
-                    pos_threshold = self.strategy_config.get('preclose_daily_position_threshold', 20)
-                    condition = (sma_20_div <= div_threshold and daily_pos <= pos_threshold)
+                # 🔥 데이트레이딩 최적화된 이격도 평가 (0~25점)
+                base_score = 0
+                
+                # === 기본 이격도 점수 (0~18점) ===
+                if sma_20_div <= -5.0:
+                    base_score = 18  # 매우 과매도 - 최고 점수
+                elif sma_20_div <= -3.0:
+                    base_score = 15  # 과매도 - 높은 점수
+                elif sma_20_div <= -1.5:
+                    base_score = 12  # 약간 과매도 - 좋은 점수
+                elif sma_20_div <= 0:
+                    base_score = 10  # 20일선 아래 - 괜찮은 점수
+                elif sma_20_div <= 1.5:
+                    base_score = 7   # 약간 위 - 보통 점수
+                elif sma_20_div <= 3.0:
+                    base_score = 5   # 과매수 초기 - 낮은 점수
+                elif sma_20_div <= 5.0:
+                    base_score = 2   # 과매수 - 매우 낮은 점수
                 else:
-                    # 일반 시간: 표준 과매도 조건
-                    div_threshold = self.strategy_config.get('normal_divergence_threshold', -2.5)
-                    pos_threshold = self.strategy_config.get('normal_daily_position_threshold', 35)
-                    condition = (sma_20_div <= div_threshold and daily_pos <= pos_threshold)
+                    base_score = 0   # 심한 과매수 - 0점 (완전 배제는 아님)
                 
-                # 디버깅 정보
-                signal_strength = abs(sma_20_div) if sma_20_div < 0 else 0
-                info = f"이격도(20일선:{sma_20_div:.1f}%, 일봉위치:{daily_pos:.0f}%, 강도:{signal_strength:.1f})"
+                # === 일봉 위치 보정 (±5점) ===
+                position_bonus = 0
+                if daily_pos <= 15:
+                    position_bonus = 5   # 저점 근처 - 최대 가산점
+                elif daily_pos <= 30:
+                    position_bonus = 3   # 저점 영역 - 가산점
+                elif daily_pos <= 50:
+                    position_bonus = 1   # 중간 영역 - 소폭 가산점
+                elif daily_pos >= 85:
+                    position_bonus = -3  # 고점 근처 - 감점
+                elif daily_pos >= 70:
+                    position_bonus = -1  # 고점 영역 - 소폭 감점
                 
-                return condition, info
+                # === 시장 단계별 추가 조정 (±2점) ===
+                phase_adjustment = 0
+                if market_phase == 'opening':
+                    # 장 초반: 과매도 더 선호
+                    if sma_20_div <= -2.0:
+                        phase_adjustment = 2
+                elif market_phase == 'pre_close':
+                    # 마감 전: 매우 보수적
+                    if sma_20_div >= 2.0:
+                        phase_adjustment = -2  # 과매수 시 감점
+                
+                # === 최종 점수 계산 ===
+                final_score = max(0, min(25, base_score + position_bonus + phase_adjustment))
+                
+                # === 상세 정보 생성 ===
+                if sma_20_div <= -3.0:
+                    trend_desc = "과매도우수"
+                elif sma_20_div <= 0:
+                    trend_desc = "과매도양호"
+                elif sma_20_div <= 3.0:
+                    trend_desc = "과매수주의"
+                else:
+                    trend_desc = "과매수위험"
+                
+                if daily_pos <= 30:
+                    pos_desc = "저점권"
+                elif daily_pos >= 70:
+                    pos_desc = "고점권"
+                else:
+                    pos_desc = "중간권"
+                
+                info = f"{trend_desc}({sma_20_div:.1f}%), {pos_desc}({daily_pos:.0f}%)"
+                
+                return final_score, info
             else:
-                return True, "이격도(데이터부족)"  # 데이터 부족시 통과
+                return 12, "데이터부족"  # 데이터 부족시 중간 점수
                 
         except Exception as e:
-            logger.debug(f"이격도 조건 확인 실패 {stock.stock_code}: {e}")
-            return True, "이격도(계산실패)"  # 실패시 통과 (다른 조건에 의존)
+            logger.debug(f"이격도 점수 계산 실패 {stock.stock_code}: {e}")
+            return 12, "계산실패"  # 실패시 중간 점수
     
     def analyze_sell_conditions(self, stock: Stock, realtime_data: Dict,
                                market_phase: Optional[str] = None) -> Optional[str]:

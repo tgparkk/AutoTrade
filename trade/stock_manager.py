@@ -69,9 +69,10 @@ class StockManager:
         self._status_lock = threading.RLock()   # 상태 변경용 (중간 빈도)
         self._cache_lock = threading.RLock()    # 캐시용
         
-        # === 6. 기본 설정 ===
+        # === 6. 🔥 설정 파일 기반 기본 설정 (하드코딩 제거) ===
         self.candidate_stocks: List[str] = []
-        self.max_selected_stocks = 10
+        # 종목 관리 설정은 performance_config에서 로드
+        self.max_selected_stocks = self.performance_config.get('max_premarket_selected_stocks', 10)  # 장전 선정 종목 한도
         
         logger.info("StockManager 초기화 완료 (하이브리드 방식, 성능 최적화)")
     
@@ -227,8 +228,9 @@ class StockManager:
                 logger.warning(f"이미 관리 중인 종목입니다: {stock_code}[{stock_name}] - 장중 추가 생략")
                 return False
             
-            # 2. 최대 종목 수 확인 (장중 추가는 더 여유있게 설정)
-            max_total_stocks = self.max_selected_stocks + 10  # 기본 + 장중 추가 여유분
+            # 2. 🔥 설정 기반 최대 종목 수 확인 (하드코딩 제거)
+            max_intraday_stocks = self.performance_config.get('max_intraday_selected_stocks', 10)
+            max_total_stocks = self.max_selected_stocks + max_intraday_stocks  # 장전 선정 + 장중 선정
             if len(self.reference_stocks) >= max_total_stocks:
                 logger.warning(f"최대 관리 종목 수 초과: {len(self.reference_stocks)}/{max_total_stocks} - 장중 추가 제한")
                 return False
@@ -766,6 +768,15 @@ class StockManager:
     
     def get_all_positions(self) -> List[Stock]:
         return self.get_all_selected_stocks()
+    
+    def get_all_stock_codes(self) -> List[str]:
+        """현재 관리 중인 모든 종목 코드 반환
+        
+        Returns:
+            종목 코드 리스트
+        """
+        with self._ref_lock:
+            return list(self.stock_metadata.keys())
     
     # === 주문 복구 관련 메서드들 (OrderRecoveryManager로 이관됨) ===
     # 이 메서드들은 하위 호환성을 위해 유지하되, 실제 로직은 OrderRecoveryManager에 위임

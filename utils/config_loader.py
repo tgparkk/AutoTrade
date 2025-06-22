@@ -256,22 +256,47 @@ class TradingConfigLoader:
         """
         section = 'PERFORMANCE'
         performance_config = {
+            # 캐시 설정
             'cache_ttl_seconds': self.get_float('cache_ttl_seconds', section, 2.0),
             'price_cache_size': self.get_int('price_cache_size', section, 100),
             'enable_cache_debug': self.get_bool('enable_cache_debug', section, False),
+            
+            # 기본 전략 설정
             'volume_increase_threshold': self.get_float('volume_increase_threshold', section, 2.0),
             'volume_min_threshold': self.get_int('volume_min_threshold', section, 100000),
             'pattern_score_threshold': self.get_float('pattern_score_threshold', section, 70.0),
             'max_holding_days': self.get_int('max_holding_days', section, 1),
+            
+            # KIS 공식 문서 기반 고급 매매 지표 임계값
             'contract_strength_threshold': self.get_float('contract_strength_threshold', section, 120.0),
             'buy_ratio_threshold': self.get_float('buy_ratio_threshold', section, 60.0),
             'vi_activation_threshold': self.get_bool('vi_activation_threshold', section, True),
             'market_pressure_weight': self.get_float('market_pressure_weight', section, 0.3),
             'spread_threshold': self.get_float('spread_threshold', section, 0.01),
+            
+            # 고급 매도 조건 임계값
             'weak_contract_strength_threshold': self.get_float('weak_contract_strength_threshold', section, 80.0),
             'low_buy_ratio_threshold': self.get_float('low_buy_ratio_threshold', section, 30.0),
             'high_volatility_threshold': self.get_float('high_volatility_threshold', section, 5.0),
-            'price_decline_from_high_threshold': self.get_float('price_decline_from_high_threshold', section, 0.03)
+            'price_decline_from_high_threshold': self.get_float('price_decline_from_high_threshold', section, 0.03),
+            
+            # 🆕 종목 관리 설정
+            'max_premarket_selected_stocks': self.get_int('max_premarket_selected_stocks', section, 10),
+            'max_intraday_selected_stocks': self.get_int('max_intraday_selected_stocks', section, 10),
+            'max_total_observable_stocks': self.get_int('max_total_observable_stocks', section, 20),
+            'intraday_scan_interval_minutes': self.get_int('intraday_scan_interval_minutes', section, 30),
+            
+            # 🆕 웹소켓 연결 설정
+            'websocket_max_connections': self.get_int('websocket_max_connections', section, 41),
+            'websocket_connections_per_stock': self.get_int('websocket_connections_per_stock', section, 2),
+            'websocket_system_connections': self.get_int('websocket_system_connections', section, 1),
+            
+            # RealTimeMonitor 모니터링 설정
+            'fast_monitoring_interval': self.get_int('fast_monitoring_interval', section, 3),
+            'normal_monitoring_interval': self.get_int('normal_monitoring_interval', section, 10),
+            'market_volatility_threshold': self.get_float('market_volatility_threshold', section, 0.02),
+            'high_volume_threshold': self.get_float('high_volume_threshold', section, 3.0),
+            'high_volatility_position_ratio': self.get_float('high_volatility_position_ratio', section, 0.3)
         }
         
         logger.info("성능 설정 로드 완료")

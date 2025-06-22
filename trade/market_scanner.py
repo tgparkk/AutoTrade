@@ -118,7 +118,7 @@ class MarketScanner:
             if stock['code'].isdigit() and len(stock['code']) == 6 and '우' not in stock['name']
         ]
 
-        scan_candidates = scan_candidates[:100]
+        #scan_candidates = scan_candidates[:100]
         
         logger.info(f"스캔 대상 종목 수: {len(scan_candidates)} (우선주 제외)")
         
@@ -984,9 +984,8 @@ class MarketScanner:
             )
             
             # 기존 선정 종목 제외를 위한 코드 리스트
-            from trade.stock_manager import StockManager
-            excluded_codes = set()
-            # TODO: StockManager에서 현재 관리 중인 종목 코드들 가져오기
+            excluded_codes = set(self.stock_manager.get_all_stock_codes())
+            logger.debug(f"기존 관리 종목 제외: {len(excluded_codes)}개 ({', '.join(list(excluded_codes)[:5])}{'...' if len(excluded_codes) > 5 else ''})")
             
             candidate_stocks = {}  # {종목코드: {'score': 점수, 'reasons': [사유들]}}
             
