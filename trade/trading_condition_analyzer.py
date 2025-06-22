@@ -37,11 +37,11 @@ class TradingConditionAnalyzer:
         self.strategy_config = self.config_loader.load_trading_strategy_config()
         self.risk_config = self.config_loader.load_risk_management_config()
         
-        # 🆕 공식 문서 기반 고급 매매 지표 임계값
-        self.contract_strength_threshold = 120.0  # 체결강도 임계값
-        self.buy_ratio_threshold = 60.0          # 매수비율 임계값 (%)
-        self.vi_activation_threshold = True       # VI 발동 시 거래 중단 여부
-        self.market_pressure_weight = 0.3        # 시장압력 가중치
+        # 🔥 설정 기반 공식 문서 기반 고급 매매 지표 임계값 (하드코딩 제거)
+        self.contract_strength_threshold = self.strategy_config.get('contract_strength_threshold', 120.0)
+        self.buy_ratio_threshold = self.strategy_config.get('buy_ratio_threshold', 60.0)
+        self.vi_activation_threshold = self.strategy_config.get('vi_activation_threshold', True)
+        self.market_pressure_weight = self.strategy_config.get('market_pressure_weight', 0.3)
         
         logger.info("TradingConditionAnalyzer 초기화 완료")
     
@@ -102,20 +102,20 @@ class TradingConditionAnalyzer:
                 logger.debug(f"거래 제외: {stock.stock_code} (거래정지: {trading_halt}, VI발동: {vi_standard_price > 0})")
                 return False
             
-            # 시장 단계별 조건 조정
+            # 🔥 설정 기반 시장 단계별 조건 조정 (하드코딩 제거)
             if market_phase == 'opening':
-                volume_threshold = self.strategy_config.get('volume_increase_threshold', 2.0) * 1.5
-                price_threshold = 0.015  # 1.5%
-                contract_strength_min = self.contract_strength_threshold * 1.2
-                buy_ratio_min = self.buy_ratio_threshold * 1.1
+                volume_threshold = self.strategy_config.get('volume_increase_threshold', 2.0) * self.strategy_config.get('opening_volume_multiplier', 1.5)
+                price_threshold = self.strategy_config.get('opening_price_threshold', 0.015)
+                contract_strength_min = self.contract_strength_threshold * self.strategy_config.get('opening_contract_strength_multiplier', 1.2)
+                buy_ratio_min = self.buy_ratio_threshold * self.strategy_config.get('opening_buy_ratio_multiplier', 1.1)
             elif market_phase == 'pre_close':
-                volume_threshold = self.strategy_config.get('volume_increase_threshold', 2.0) * 2.0
-                price_threshold = 0.02   # 2%
-                contract_strength_min = self.contract_strength_threshold * 1.5
-                buy_ratio_min = self.buy_ratio_threshold * 1.2
+                volume_threshold = self.strategy_config.get('volume_increase_threshold', 2.0) * self.strategy_config.get('preclose_volume_multiplier', 2.0)
+                price_threshold = self.strategy_config.get('preclose_price_threshold', 0.02)
+                contract_strength_min = self.contract_strength_threshold * self.strategy_config.get('preclose_contract_strength_multiplier', 1.5)
+                buy_ratio_min = self.buy_ratio_threshold * self.strategy_config.get('preclose_buy_ratio_multiplier', 1.2)
             else:
                 volume_threshold = self.strategy_config.get('volume_increase_threshold', 2.0)
-                price_threshold = 0.01   # 1%
+                price_threshold = self.strategy_config.get('normal_price_threshold', 0.01)
                 contract_strength_min = self.contract_strength_threshold
                 buy_ratio_min = self.buy_ratio_threshold
             
@@ -129,8 +129,11 @@ class TradingConditionAnalyzer:
             min_volume = self.strategy_config.get('volume_min_threshold', 100000)
             volume_min_condition = realtime_data.get('volume', 0) >= min_volume
             
-            # 3. 패턴 점수 조건 (시장 단계별 조정)
-            min_pattern_score = 70.0 if market_phase != 'opening' else 75.0
+            # 🔥 설정 기반 패턴 점수 조건 (하드코딩 제거)
+            if market_phase == 'opening':
+                min_pattern_score = self.strategy_config.get('opening_pattern_score_threshold', 75.0)
+            else:
+                min_pattern_score = self.strategy_config.get('normal_pattern_score_threshold', 70.0)
             pattern_condition = stock.total_pattern_score >= min_pattern_score
             
             # 4. 🆕 체결강도 조건 (KIS 공식 필드)
@@ -142,13 +145,14 @@ class TradingConditionAnalyzer:
             # 6. 🆕 시장압력 조건 (KIS 공식 필드)
             market_pressure_condition = market_pressure in ['BUY', 'NEUTRAL']
             
-            # 7. 호가 스프레드 조건 (너무 넓은 스프레드 제외)
+            # 🔥 설정 기반 호가 스프레드 조건 (하드코딩 제거)
             bid_price = realtime_data.get('bid_price', 0)
             ask_price = realtime_data.get('ask_price', 0)
             spread_condition = True
             if bid_price > 0 and ask_price > 0:
                 spread_rate = (ask_price - bid_price) / bid_price
-                spread_condition = spread_rate <= 0.01  # 1% 이하 스프레드만 허용
+                spread_threshold = self.strategy_config.get('spread_threshold', 0.01)
+                spread_condition = spread_rate <= spread_threshold
             
             # 🆕 8. 이격도 조건 (핵심 매수 타이밍 지표)
             divergence_condition, divergence_info = self._analyze_divergence_buy_signal(
@@ -200,16 +204,22 @@ class TradingConditionAnalyzer:
                     if day_range > 0:
                         daily_pos = (current_price - stock.realtime_data.today_low) / day_range * 100
                 
-                # 매수 신호 판단 (시장 단계별 차등 적용)
+                # 🔥 설정 기반 매수 신호 판단 (하드코딩 제거)
                 if market_phase == 'opening':
                     # 장 초반: 강한 과매도 + 저점 근처
-                    condition = (sma_20_div <= -3.5 and daily_pos <= 25)
+                    div_threshold = self.strategy_config.get('opening_divergence_threshold', -3.5)
+                    pos_threshold = self.strategy_config.get('opening_daily_position_threshold', 25)
+                    condition = (sma_20_div <= div_threshold and daily_pos <= pos_threshold)
                 elif market_phase == 'pre_close':
                     # 마감 전: 매우 보수적 (깊은 과매도)
-                    condition = (sma_20_div <= -4.0 and daily_pos <= 20)
+                    div_threshold = self.strategy_config.get('preclose_divergence_threshold', -4.0)
+                    pos_threshold = self.strategy_config.get('preclose_daily_position_threshold', 20)
+                    condition = (sma_20_div <= div_threshold and daily_pos <= pos_threshold)
                 else:
                     # 일반 시간: 표준 과매도 조건
-                    condition = (sma_20_div <= -2.5 and daily_pos <= 35)
+                    div_threshold = self.strategy_config.get('normal_divergence_threshold', -2.5)
+                    pos_threshold = self.strategy_config.get('normal_daily_position_threshold', 35)
+                    condition = (sma_20_div <= div_threshold and daily_pos <= pos_threshold)
                 
                 # 디버깅 정보
                 signal_strength = abs(sma_20_div) if sma_20_div < 0 else 0
@@ -271,8 +281,10 @@ class TradingConditionAnalyzer:
             if market_phase == 'closing':
                 return "market_close"
             
-            # 1-3. 급락 감지 (5% 이상 손실 + 고변동성)
-            if current_pnl_rate <= -5.0 and volatility >= 3.0:
+            # 🔥 설정 기반 급락 감지 (하드코딩 제거)
+            emergency_loss_rate = self.strategy_config.get('emergency_stop_loss_rate', -5.0)
+            emergency_volatility = self.strategy_config.get('emergency_volatility_threshold', 3.0)
+            if current_pnl_rate <= emergency_loss_rate and volatility >= emergency_volatility:
                 return "emergency_stop"
             
             # === 우선순위 2: 손절 조건 ===
@@ -292,37 +304,39 @@ class TradingConditionAnalyzer:
             if stock.should_take_profit(current_price):
                 return "take_profit"
             
-            # 3-2. 시장 단계별 보수적 익절
+            # 🔥 설정 기반 시장 단계별 보수적 익절 (하드코딩 제거)
             if market_phase == 'pre_close':
-                # 마감 전에는 0.5% 이상 수익시 매도
-                if current_pnl_rate >= 0.5:
+                preclose_profit_threshold = self.strategy_config.get('preclose_profit_threshold', 0.5)
+                if current_pnl_rate >= preclose_profit_threshold:
                     return "pre_close_profit"
             
-            # 3-3. 시간 기반 익절 (장시간 보유시 작은 수익도 확정)
-            if holding_minutes >= 180:  # 3시간 이상 보유
-                if current_pnl_rate >= 0.3:  # 0.3% 이상 수익
+            # 🔥 설정 기반 시간 익절 (하드코딩 제거)
+            long_hold_minutes = self.strategy_config.get('long_hold_minutes', 180)
+            long_hold_profit_threshold = self.strategy_config.get('long_hold_profit_threshold', 0.3)
+            if holding_minutes >= long_hold_minutes:
+                if current_pnl_rate >= long_hold_profit_threshold:
                     return "long_hold_profit"
             
             # === 우선순위 4: 기술적 지표 기반 매도 ===
             
-            # 4-1. 체결강도 급락 (설정 기반 임계값)
-            contract_strength_threshold = self.strategy_config.get('sell_contract_strength_threshold', 80.0)
-            if contract_strength <= contract_strength_threshold:
+            # 🔥 설정 기반 체결강도 급락 (하드코딩 제거)
+            weak_contract_strength_threshold = self.strategy_config.get('weak_contract_strength_threshold', 80.0)
+            if contract_strength <= weak_contract_strength_threshold:
                 # 손실 상황에서만 적용 (수익 상황에서는 너무 성급한 매도 방지)
                 if current_pnl_rate <= 0:
                     return "weak_contract_strength"
             
-            # 4-2. 매수비율 급락 (설정 기반 임계값)
-            buy_ratio_threshold = self.strategy_config.get('sell_buy_ratio_threshold', 30.0)
-            if buy_ratio <= buy_ratio_threshold:
+            # 🔥 설정 기반 매수비율 급락 (하드코딩 제거)
+            low_buy_ratio_threshold = self.strategy_config.get('low_buy_ratio_threshold', 30.0)
+            if buy_ratio <= low_buy_ratio_threshold:
                 # 손실 상황이거나 장시간 보유시에만 적용
                 if current_pnl_rate <= 0 or holding_minutes >= 120:
                     return "low_buy_ratio"
             
-            # 4-3. 시장압력 변화
+            # 🔥 설정 기반 시장압력 변화 (하드코딩 제거)
             if market_pressure == 'SELL':
-                # 손실 상황에서만 적용
-                if current_pnl_rate <= -1.0:
+                market_pressure_loss_threshold = self.strategy_config.get('market_pressure_sell_loss_threshold', -1.0)
+                if current_pnl_rate <= market_pressure_loss_threshold:
                     return "market_pressure_sell"
             
             # 🆕 4-4. 이격도 기반 매도 (과열 구간 감지)
@@ -334,15 +348,15 @@ class TradingConditionAnalyzer:
             
             # === 우선순위 5: 고변동성 기반 매도 ===
             
-            # 5-1. 고점 대비 하락 + 고변동성
-            volatility_threshold = self.strategy_config.get('sell_volatility_threshold', 5.0)
-            if volatility >= volatility_threshold:
+            # 🔥 설정 기반 고점 대비 하락 + 고변동성 (하드코딩 제거)
+            high_volatility_threshold = self.strategy_config.get('high_volatility_threshold', 5.0)
+            if volatility >= high_volatility_threshold:
                 today_high = stock.realtime_data.today_high
                 if today_high > 0:
                     price_from_high = (today_high - current_price) / today_high * 100
-                    high_drop_threshold = self.strategy_config.get('sell_high_drop_threshold', 3.0)
+                    price_decline_threshold = self.strategy_config.get('price_decline_from_high_threshold', 0.03) * 100  # % 변환
                     
-                    if price_from_high >= high_drop_threshold:
+                    if price_from_high >= price_decline_threshold:
                         return "high_volatility_decline"
             
             # === 우선순위 6: 시간 기반 매도 ===
@@ -351,21 +365,26 @@ class TradingConditionAnalyzer:
             if stock.is_holding_period_exceeded():
                 return "holding_period"
             
-            # 6-2. 장시간 보유 + 소폭 손실 (기회비용 고려)
-            max_holding_minutes = self.strategy_config.get('max_holding_minutes', 240)  # 4시간
+            # 🔥 설정 기반 장시간 보유 + 소폭 손실 (하드코딩 제거)
+            max_holding_minutes = self.strategy_config.get('max_holding_minutes', 240)
             if holding_minutes >= max_holding_minutes:
-                if -2.0 <= current_pnl_rate <= 1.0:  # -2%~1% 범위
+                min_loss = self.strategy_config.get('opportunity_cost_min_loss', -2.0)
+                max_profit = self.strategy_config.get('opportunity_cost_max_profit', 1.0)
+                if min_loss <= current_pnl_rate <= max_profit:
                     return "opportunity_cost"
             
             # === 우선순위 7: 적응적 매도 (최근 성과 기반) ===
             
-            # 최근 승률이 낮으면 더 보수적으로 매도
+            # 🔥 설정 기반 적응적 매도 (하드코딩 제거)
             recent_win_rate = self.trade_executor._calculate_recent_win_rate(5)
-            if recent_win_rate < 0.3:  # 최근 승률 30% 미만
+            conservative_win_rate_threshold = self.strategy_config.get('conservative_win_rate_threshold', 0.3)
+            if recent_win_rate < conservative_win_rate_threshold:
                 # 보수적 매도: 작은 수익도 확정, 작은 손실도 빠르게 정리
-                if current_pnl_rate >= 0.8:  # 0.8% 수익시 매도
+                conservative_profit_threshold = self.strategy_config.get('conservative_profit_threshold', 0.8)
+                conservative_stop_threshold = self.strategy_config.get('conservative_stop_threshold', -1.5)
+                if current_pnl_rate >= conservative_profit_threshold:
                     return "conservative_profit"
-                elif current_pnl_rate <= -1.5:  # 1.5% 손실시 매도
+                elif current_pnl_rate <= conservative_stop_threshold:
                     return "conservative_stop"
             
             return None
@@ -399,16 +418,23 @@ class TradingConditionAnalyzer:
                     if day_range > 0:
                         daily_pos = (current_price - stock.realtime_data.today_low) / day_range * 100
                 
-                # 과열 구간 매도 조건 (시장 단계별 차등 적용)
-                overheated_threshold = 5.0 if market_phase == 'normal' else 4.0  # 마감 전/장 초반 더 엄격
-                high_position_threshold = 80.0 if market_phase == 'normal' else 75.0
+                # 🔥 설정 기반 과열 구간 매도 조건 (하드코딩 제거)
+                if market_phase == 'pre_close':
+                    overheated_threshold = self.strategy_config.get('sell_overheated_threshold_preclose', 4.0)
+                    high_position_threshold = self.strategy_config.get('sell_high_position_threshold_preclose', 75.0)
+                else:
+                    overheated_threshold = self.strategy_config.get('sell_overheated_threshold', 5.0)
+                    high_position_threshold = self.strategy_config.get('sell_high_position_threshold', 80.0)
                 
                 # 강한 과열 신호: 높은 이격도 + 고점 근처 + 수익 상황
                 if (sma_20_div >= overheated_threshold and daily_pos >= high_position_threshold and current_pnl_rate >= 1.0):
                     return "divergence_overheated"
                 
-                # 중간 과열 신호: 장시간 보유 + 과열 + 소폭 수익
-                elif (sma_20_div >= 3.0 and daily_pos >= 70.0 and current_pnl_rate >= 0.5 and holding_minutes >= 120):
+                # 🔥 설정 기반 중간 과열 신호 (하드코딩 제거)
+                mild_overheated_threshold = self.strategy_config.get('sell_mild_overheated_threshold', 3.0)
+                mild_position_threshold = self.strategy_config.get('sell_mild_position_threshold', 70.0)
+                if (sma_20_div >= mild_overheated_threshold and daily_pos >= mild_position_threshold and 
+                    current_pnl_rate >= 0.5 and holding_minutes >= 120):
                     return "divergence_mild_overheated"
             
             return None
@@ -428,15 +454,17 @@ class TradingConditionAnalyzer:
         """
         base_stop_loss = self.risk_config.get('stop_loss_rate', -0.02)
         
-        # 보유 시간이 길수록 더 엄격한 손절 적용
+        # 🔥 설정 기반 보유 시간별 손절 배수 (하드코딩 제거)
         if holding_minutes <= 30:  # 30분 이내
-            return base_stop_loss  # 기본 손절률
+            multiplier = self.strategy_config.get('time_stop_30min_multiplier', 1.0)
         elif holding_minutes <= 120:  # 2시간 이내
-            return base_stop_loss * 0.8  # 1.6% 손절
+            multiplier = self.strategy_config.get('time_stop_2hour_multiplier', 0.8)
         elif holding_minutes <= 240:  # 4시간 이내
-            return base_stop_loss * 0.6  # 1.2% 손절
+            multiplier = self.strategy_config.get('time_stop_4hour_multiplier', 0.6)
         else:  # 4시간 초과
-            return base_stop_loss * 0.4  # 0.8% 손절
+            multiplier = self.strategy_config.get('time_stop_over4hour_multiplier', 0.4)
+        
+        return base_stop_loss * multiplier
     
     def calculate_buy_quantity(self, stock: Stock) -> int:
         """매수량 계산 (설정 기반 개선 버전)

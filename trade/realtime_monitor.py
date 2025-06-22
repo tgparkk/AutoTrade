@@ -51,9 +51,9 @@ class RealTimeMonitor:
         self.market_config = self.config_loader.load_market_schedule_config()
         self.risk_config = self.config_loader.load_risk_management_config()
         
-        # 장시간 최적화 설정
-        self.fast_monitoring_interval = 3   # 빠른 모니터링: 3초
-        self.normal_monitoring_interval = 10  # 일반 모니터링: 10초
+        # 🔥 설정 기반 모니터링 주기 (하드코딩 제거)
+        self.fast_monitoring_interval = self.strategy_config.get('fast_monitoring_interval', 3)
+        self.normal_monitoring_interval = self.strategy_config.get('normal_monitoring_interval', 10)
         self.current_monitoring_interval = self.fast_monitoring_interval
         
         # 모니터링 상태
@@ -76,22 +76,34 @@ class RealTimeMonitor:
         self.buy_orders_executed = 0     # 매수 체결 수 (웹소켓에서 업데이트)
         self.sell_orders_executed = 0    # 매도 체결 수 (웹소켓에서 업데이트)
         
-        # 시장 시간 설정
-        self.market_open_time = dt_time(9, 0)   # 09:00
-        self.market_close_time = dt_time(15, 30)  # 15:30
-        self.day_trading_exit_time = dt_time(15, 0)  # 15:00 (데이트레이딩 종료)
-        self.pre_close_time = dt_time(14, 50)  # 14:50 (마감 10분 전)
+        # 🔥 설정 기반 시장 시간 (하드코딩 제거)
+        self.market_open_time = dt_time(
+            self.strategy_config.get('market_open_hour', 9), 
+            self.strategy_config.get('market_open_minute', 0)
+        )
+        self.market_close_time = dt_time(
+            self.strategy_config.get('market_close_hour', 15), 
+            self.strategy_config.get('market_close_minute', 30)
+        )
+        self.day_trading_exit_time = dt_time(
+            self.strategy_config.get('day_trading_exit_hour', 15), 
+            self.strategy_config.get('day_trading_exit_minute', 0)
+        )
+        self.pre_close_time = dt_time(
+            self.strategy_config.get('pre_close_hour', 14), 
+            self.strategy_config.get('pre_close_minute', 50)
+        )
         
-        # 장시간 동적 조정
-        self.market_volatility_threshold = 0.02  # 2% 이상 변동시 빠른 모니터링
-        self.high_volume_threshold = 3.0  # 3배 이상 거래량 증가시 빠른 모니터링
+        # 🔥 설정 기반 동적 조정 임계값 (하드코딩 제거)
+        self.market_volatility_threshold = self.strategy_config.get('market_volatility_threshold', 0.02)
+        self.high_volume_threshold = self.strategy_config.get('high_volume_threshold', 3.0)
+        self.high_volatility_position_ratio = self.strategy_config.get('high_volatility_position_ratio', 0.3)
         
-
-        
-        # 🆕 장중 추가 종목 스캔 관련
+        # 🔥 설정 기반 장중 추가 종목 스캔 (하드코딩 제거)
         self.last_intraday_scan_time = None
-        self.intraday_scan_interval = 30 * 60  # 30분 간격 (초 단위)
-        self.max_additional_stocks = 10  # 최대 추가 종목 수
+        self.intraday_scan_interval = self.strategy_config.get('intraday_scan_interval_minutes', 30) * 60  # 분을 초로 변환
+        self.max_additional_stocks = self.strategy_config.get('max_additional_stocks', 10)
+        self.websocket_slots_minimum_reserve = self.strategy_config.get('websocket_slots_minimum_reserve', 10)
         
         logger.info("RealTimeMonitor 초기화 완료 (웹소켓 기반 최적화 버전 + 장중추가스캔)")
     
@@ -208,8 +220,8 @@ class RealTimeMonitor:
                         if price_change_rate >= self.market_volatility_threshold:
                             high_volatility_count += 1
             
-            # 30% 이상의 종목이 고변동성이면 전체적으로 고변동성 시장
-            return high_volatility_count >= len(positions) * 0.3
+            # 설정 기반 고변동성 종목 비율 임계값
+            return high_volatility_count >= len(positions) * self.high_volatility_position_ratio
             
         except Exception as e:
             logger.error(f"고변동성 감지 오류: {e}")
@@ -467,11 +479,13 @@ class RealTimeMonitor:
                     return
             else:
                 # 테스트 모드: 시간 제한 없이 실행
-                if self.market_scan_count % 100 == 0:  # 주기적으로 테스트 모드 알림
+                test_mode_log_interval = self.strategy_config.get('test_mode_log_interval_cycles', 100)
+                if self.market_scan_count % test_mode_log_interval == 0:  # 설정 기반 테스트 모드 알림
                     logger.debug("테스트 모드 - 시장시간 무관하게 실행 중")
             
-            # 성능 로깅 (5분마다)
-            if self.market_scan_count % (300 // self.current_monitoring_interval) == 0:
+            # 🔥 설정 기반 성능 로깅 주기
+            performance_log_seconds = self.strategy_config.get('performance_log_interval_minutes', 5) * 60
+            if self.market_scan_count % (performance_log_seconds // self.current_monitoring_interval) == 0:
                 self._log_performance_metrics()
             
             # 매수 준비 종목 처리
@@ -480,15 +494,17 @@ class RealTimeMonitor:
             # 매도 준비 종목 처리  
             sell_result = self.process_sell_ready_stocks()
             
-            # 🆕 장중 추가 종목 스캔 (30분마다)
+            # 🆕 장중 추가 종목 스캔
             self._check_and_run_intraday_scan()
             
-            # 🔧 정체된 주문 타임아웃 체크 (30초마다 - 6회마다 실행)
-            if self.market_scan_count % (30 // self.current_monitoring_interval) == 0:
+            # 🔥 설정 기반 정체된 주문 타임아웃 체크
+            stuck_order_check_seconds = self.strategy_config.get('stuck_order_check_interval_seconds', 30)
+            if self.market_scan_count % (stuck_order_check_seconds // self.current_monitoring_interval) == 0:
                 self._check_stuck_orders()
             
-            # 주기적 상태 리포트 (1분마다)
-            if self.market_scan_count % (60 // self.current_monitoring_interval) == 0:
+            # 🔥 설정 기반 주기적 상태 리포트
+            status_report_seconds = self.strategy_config.get('status_report_interval_minutes', 1) * 60
+            if self.market_scan_count % (status_report_seconds // self.current_monitoring_interval) == 0:
                 self._log_status_report(buy_result, sell_result)
                 
         except Exception as e:
@@ -572,7 +588,7 @@ class RealTimeMonitor:
             current_websocket_count = len(self.stock_manager.get_all_positions()) * 2 + 1  # 종목당 2개 + 체결통보 1개
             available_slots = 41 - current_websocket_count
             
-            if available_slots < 10:  # 최소 10개 슬롯 여유 필요 (추가 5종목 × 2)
+            if available_slots < self.websocket_slots_minimum_reserve:  # 설정 기반 최소 슬롯 여유 필요
                 logger.debug(f"웹소켓 슬롯 부족으로 장중 스캔 생략 (사용:{current_websocket_count}/41, 여유:{available_slots})")
                 return
             
