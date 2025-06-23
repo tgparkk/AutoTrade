@@ -508,7 +508,7 @@ class RealTimeMonitor:
                 # 테스트 모드: 시간 제한 없이 실행
                 test_mode_log_interval = self.strategy_config.get('test_mode_log_interval_cycles', 100)
                 if self._market_scan_count % test_mode_log_interval == 0:  # 설정 기반 테스트 모드 알림
-                    logger.debug("테스트 모드 - 시장시간 무관하게 실행 중")
+                    logger.info("🧪 테스트 모드 실행 중 - 시장시간 무관하게 매수/매도 분석 진행")
             
             # 🔥 설정 기반 성능 로깅 주기 (정확한 시간 간격 계산)
             performance_log_seconds = self.strategy_config.get('performance_log_interval_minutes', 5) * 60
@@ -608,13 +608,178 @@ class RealTimeMonitor:
             current_time = now_kst().strftime("%H:%M:%S")
             market_phase = self.get_market_phase()
             
+            # 웹소켓 상태 정보 추가
+            websocket_status = self._get_websocket_status_summary()
+            
             logger.info(f"🕐 {current_time} ({market_phase}) - "
                        f"매수(확인:{buy_result['checked']}/신호:{buy_result['signaled']}/주문:{buy_result['ordered']}), "
                        f"매도(확인:{sell_result['checked']}/신호:{sell_result['signaled']}/주문:{sell_result['ordered']}), "
-                       f"모니터링주기: {self.current_monitoring_interval}초")
+                       f"모니터링주기: {self.current_monitoring_interval}초, "
+                       f"웹소켓: {websocket_status}")
                        
         except Exception as e:
             logger.error(f"상태 리포트 로깅 오류: {e}")
+    
+    def _get_websocket_status_summary(self) -> str:
+        """웹소켓 상태 요약 문자열 반환"""
+        try:
+            websocket_manager = getattr(self.stock_manager, 'websocket_manager', None)
+            if not websocket_manager:
+                return "미사용"
+            
+            # 웹소켓 연결 상태
+            is_connected = websocket_manager.is_connected
+            is_healthy = websocket_manager.is_websocket_healthy()
+            
+            # 구독 정보
+            subscribed_count = len(websocket_manager.get_subscribed_stocks())
+            
+            # 메시지 통계
+            message_stats = websocket_manager.message_handler.stats
+            total_messages = message_stats.get('messages_received', 0)
+            last_message_time = message_stats.get('last_message_time')
+            
+            # 마지막 메시지 수신 시간 계산
+            if last_message_time:
+                time_since_last = (now_kst() - last_message_time).total_seconds()
+                if time_since_last < 60:
+                    last_msg_info = f"{time_since_last:.0f}초전"
+                else:
+                    last_msg_info = f"{time_since_last/60:.1f}분전"
+            else:
+                last_msg_info = "없음"
+            
+            # 연결 상태 아이콘
+            status_icon = "🟢" if is_connected and is_healthy else "🔴" if is_connected else "⚪"
+            
+            return f"{status_icon}({subscribed_count}개구독/총{total_messages}건/최근{last_msg_info})"
+            
+        except Exception as e:
+            logger.debug(f"웹소켓 상태 요약 오류: {e}")
+            return "오류"
+    
+    def check_websocket_data_reception(self) -> Dict:
+        """웹소켓 데이터 수신 상태 상세 체크"""
+        try:
+            websocket_manager = getattr(self.stock_manager, 'websocket_manager', None)
+            if not websocket_manager:
+                return {
+                    'available': False,
+                    'error': '웹소켓 매니저 없음'
+                }
+            
+            # 연결 상태 체크
+            connection_status = {
+                'is_connected': websocket_manager.is_connected,
+                'is_running': websocket_manager.is_running,
+                'is_healthy': websocket_manager.is_websocket_healthy()
+            }
+            
+            # 구독 상태 체크
+            subscription_status = {
+                'subscribed_stocks': websocket_manager.get_subscribed_stocks(),
+                'subscription_count': len(websocket_manager.get_subscribed_stocks()),
+                'has_capacity': websocket_manager.has_subscription_capacity()
+            }
+            
+            # 메시지 수신 통계
+            message_stats = websocket_manager.message_handler.stats
+            reception_stats = {
+                'total_messages_received': message_stats.get('messages_received', 0),
+                'last_message_time': message_stats.get('last_message_time'),
+                'ping_pong_count': message_stats.get('ping_pong_count', 0),
+                'last_ping_pong_time': message_stats.get('last_ping_pong_time'),
+                'error_count': message_stats.get('errors', 0)
+            }
+            
+            # 실시간 데이터 업데이트 상태 체크
+            realtime_data_status = {}
+            for stock_code in subscription_status['subscribed_stocks']:
+                stock = self.stock_manager.get_selected_stock(stock_code)
+                if stock:
+                    last_updated = stock.realtime_data.last_updated
+                    if last_updated:
+                        seconds_ago = (now_kst() - last_updated).total_seconds()
+                        realtime_data_status[stock_code] = {
+                            'last_updated': last_updated,
+                            'seconds_ago': seconds_ago,
+                            'is_fresh': seconds_ago < 60  # 1분 이내면 신선함
+                        }
+                    else:
+                        realtime_data_status[stock_code] = {
+                            'last_updated': None,
+                            'seconds_ago': None,
+                            'is_fresh': False
+                        }
+            
+            return {
+                'available': True,
+                'connection_status': connection_status,
+                'subscription_status': subscription_status,
+                'reception_stats': reception_stats,
+                'realtime_data_status': realtime_data_status,
+                'check_time': now_kst()
+            }
+            
+        except Exception as e:
+            logger.error(f"웹소켓 데이터 수신 체크 오류: {e}")
+            return {
+                'available': False,
+                'error': str(e),
+                'check_time': now_kst()
+            }
+    
+    def log_websocket_data_reception_status(self):
+        """웹소켓 데이터 수신 상태를 상세 로그로 출력"""
+        try:
+            status = self.check_websocket_data_reception()
+            
+            if not status['available']:
+                logger.warning(f"❌ 웹소켓 데이터 수신 체크 불가: {status.get('error', '알 수 없는 오류')}")
+                return
+            
+            logger.info("=" * 50)
+            logger.info("📡 웹소켓 데이터 수신 상태 체크")
+            logger.info("=" * 50)
+            
+            # 연결 상태
+            conn = status['connection_status']
+            logger.info(f"🔌 연결 상태: 연결됨={conn['is_connected']}, 실행중={conn['is_running']}, 건강={conn['is_healthy']}")
+            
+            # 구독 상태
+            sub = status['subscription_status']
+            logger.info(f"📋 구독 상태: {sub['subscription_count']}개 구독, 여유={sub['has_capacity']}")
+            logger.info(f"   구독 종목: {', '.join(sub['subscribed_stocks'])}")
+            
+            # 메시지 수신 통계
+            recv = status['reception_stats']
+            logger.info(f"📨 수신 통계: 총메시지={recv['total_messages_received']}건, 핑퐁={recv['ping_pong_count']}회, 오류={recv['error_count']}건")
+            
+            if recv['last_message_time']:
+                time_diff = (now_kst() - recv['last_message_time']).total_seconds()
+                logger.info(f"   최근 메시지: {time_diff:.0f}초 전 ({recv['last_message_time'].strftime('%H:%M:%S')})")
+            else:
+                logger.info("   최근 메시지: 없음")
+            
+            # 실시간 데이터 상태
+            realtime = status['realtime_data_status']
+            if realtime:
+                logger.info("🔄 실시간 데이터 업데이트 상태:")
+                for stock_code, data in realtime.items():
+                    if data['last_updated']:
+                        freshness = "신선" if data['is_fresh'] else "오래됨"
+                        logger.info(f"   {stock_code}: {data['seconds_ago']:.0f}초 전 ({freshness})")
+                    else:
+                        logger.info(f"   {stock_code}: 업데이트 없음")
+            else:
+                logger.info("🔄 실시간 데이터: 구독 종목 없음")
+            
+
+            
+            logger.info("=" * 50)
+            
+        except Exception as e:
+            logger.error(f"웹소켓 데이터 수신 상태 로깅 오류: {e}")
     
     def _cleanup_expired_data(self):
         """만료된 데이터 정리 (메모리 누수 방지)"""
@@ -989,6 +1154,15 @@ class RealTimeMonitor:
                         'price_change_rate': float(row.get('prdy_ctrt', 0.0)),  # 전일대비율
                         'volume_spike_ratio': 1.0  # 기본값
                     }
+                    
+                    # 🔥 price_change_rate 초기값 계산 (API 데이터 기반)
+                    yesterday_close = market_data['yesterday_close']
+                    if yesterday_close > 0 and yesterday_close != current_price:
+                        calculated_rate = (current_price - yesterday_close) / yesterday_close * 100
+                        market_data['price_change_rate'] = calculated_rate
+                        logger.debug(f"장중 종목 price_change_rate 계산: {stock_code} = {calculated_rate:.2f}% (현재:{current_price:,} vs 전일:{yesterday_close:,})")
+                    
+                    logger.info(f"📊 장중 종목 시장 데이터: {stock_code} 현재:{current_price:,}원, 전일:{yesterday_close:,}원, 변화율:{market_data['price_change_rate']:.2f}%")
                     
                     # StockManager에 장중 종목 추가 (스레드 안전)
                     success = self.stock_manager.add_intraday_stock(

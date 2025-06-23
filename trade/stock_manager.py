@@ -460,7 +460,7 @@ class StockManager:
                     stock_code in self._cache_timestamps and
                     current_time - self._cache_timestamps[stock_code] < self._cache_ttl):
                     if self._enable_cache_debug:
-                        logger.debug(f"Stock 객체 캐시 사용: {stock_code} (TTL: {self._cache_ttl}초)")
+                        logger.info(f"Stock 객체 캐시 사용: {stock_code} (TTL: {self._cache_ttl}초)")
                     return self._stock_cache[stock_code]
             
             # 2. 캐시 미스 - 새로 생성
@@ -1006,6 +1006,14 @@ class StockManager:
                         realtime.price_change_rate = (current_price - ref_data.yesterday_close) / ref_data.yesterday_close * 100
                     if ref_data.avg_daily_volume > 0:
                         realtime.volume_spike_ratio = acc_volume / ref_data.avg_daily_volume
+                
+                # 🔥 price_change_rate 백업 계산 (웹소켓 데이터 누락 시에만)
+                if realtime.price_change_rate == 0 and self.reference_stocks.get(stock_code):
+                    ref_data = self.reference_stocks[stock_code] 
+                    if ref_data.yesterday_close > 0:
+                        calculated_rate = (current_price - ref_data.yesterday_close) / ref_data.yesterday_close * 100
+                        realtime.price_change_rate = calculated_rate
+                        logger.debug(f"price_change_rate 백업 계산: {stock_code} = {calculated_rate:.2f}%")
                 
                 # 변동성 계산 (일중 고저 기준)
                 if realtime.today_high > 0 and realtime.today_low > 0:

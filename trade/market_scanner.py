@@ -809,13 +809,14 @@ class MarketScanner:
         """
         try:
             # OHLCV 데이터 조회
-            from api.kis_market_api import get_ohlcv_data
+            from api.kis_market_api import get_inquire_daily_itemchartprice
+            from datetime import timedelta
             
-            ohlcv_data = get_ohlcv_data(
-                itm_no=stock_code,
-                period="D",  # 일봉
-                adj_org_cls="1",  # 수정주가
-                period_cnt=30  # 30일
+            ohlcv_data = get_inquire_daily_itemchartprice(
+                output_dv="2", div_code="J", itm_no=stock_code,
+                inqr_strt_dt=(now_kst() - timedelta(days=30)).strftime("%Y%m%d"),
+                inqr_end_dt=now_kst().strftime("%Y%m%d"),
+                period_code="D", adj_prc="0"  # 수정주가
             )
             
             if ohlcv_data is None or len(ohlcv_data) < 20:
@@ -867,29 +868,59 @@ class MarketScanner:
                 logger.warning(f"종목 정보를 찾을 수 없습니다: {stock_code}")
                 return None
             
-            # 2. 실제 API에서 현재가 및 기본 정보 조회
-            from api.kis_market_api import get_inquire_price
+            # 2. 일봉 데이터로 정확한 기준 정보 조회 (price_change_rate 정확성 확보)
+            from api.kis_market_api import get_inquire_daily_itemchartprice, get_inquire_price
             
+            # 일봉 데이터 조회 (최근 5일)
+            from datetime import timedelta
+            daily_data = get_inquire_daily_itemchartprice(
+                output_dv="2", div_code="J", itm_no=stock_code,
+                inqr_strt_dt=(now_kst() - timedelta(days=5)).strftime("%Y%m%d"),  # 5일 전부터
+                inqr_end_dt=now_kst().strftime("%Y%m%d"),
+                period_code="D"
+            )
+            
+            # 현재가 조회 (실시간 정보용)
             price_data = get_inquire_price(div_code="J", itm_no=stock_code)
             
             # 3. API 데이터 검증
-            if price_data is None or price_data.empty:
+            if daily_data is None or daily_data.empty or price_data is None or price_data.empty:
                 logger.warning(f"가격 정보 조회 실패 - 종목 제외: {stock_code}")
                 return None
             
             try:
-                # 첫 번째 행의 데이터 사용
+                # 현재가 정보 (price_data에서)
                 row = price_data.iloc[0]
-                
-                # 필수 데이터 검증
                 current_price = float(row.get('stck_prpr', 0))
-                yesterday_close = float(row.get('stck_prdy_clpr', 0))
                 volume = int(row.get('acml_vol', 0))
                 
-                # 🔧 전일종가가 0인 경우 현재가로 대체 (장중 API 특성상 발생 가능)
+                # 🔥 일봉 데이터에서 정확한 전일종가 추출
+                yesterday_close = current_price  # 기본값
+                yesterday_volume = volume  # 기본값
+                
+                if daily_data is not None and len(daily_data) >= 2:
+                    # 최근 2일 데이터에서 전일 정보 추출 (첫 번째가 최신, 두 번째가 전일)
+                    if len(daily_data) >= 2:
+                        # 🔥 두 번째 행이 전일 데이터 (daily_data.iloc[1])
+                        yesterday_day = daily_data.iloc[1]
+                        yesterday_close = float(yesterday_day.get('stck_clpr', current_price))  # 전일종가
+                        yesterday_volume = int(yesterday_day.get('acml_vol', volume))  # 전일거래량
+                        
+                        logger.debug(f"일봉 데이터에서 전일 정보 추출: {stock_code} "
+                                   f"전일종가:{yesterday_close:,}원, 전일거래량:{yesterday_volume:,}주")
+                    elif len(daily_data) >= 1:
+                        # 🔥 데이터가 1개만 있으면 해당 데이터를 전일로 간주 (장외시간 등)
+                        latest_day = daily_data.iloc[0]
+                        yesterday_close = float(latest_day.get('stck_clpr', current_price))  # 전일종가
+                        yesterday_volume = int(latest_day.get('acml_vol', volume))  # 전일거래량
+                        
+                        logger.debug(f"일봉 데이터 1개 사용(전일로 간주): {stock_code} "
+                                   f"기준종가:{yesterday_close:,}원, 기준거래량:{yesterday_volume:,}주")
+                
+                # 여전히 전일종가가 0이면 현재가로 대체
                 if yesterday_close <= 0 and current_price > 0:
                     yesterday_close = current_price
-                    logger.debug(f"전일종가 0으로 현재가로 대체: {stock_code} {current_price:,}원")
+                    logger.debug(f"전일종가 최종 보정: {stock_code} {current_price:,}원")
                 
                 # 필수 데이터가 없으면 종목 제외 (완화된 조건)
                 if current_price <= 0 or yesterday_close <= 0:
@@ -902,19 +933,24 @@ class MarketScanner:
                     logger.warning(f"비정상 거래량으로 종목 제외: {stock_code} 거래량:{volume}")
                     return None
                 
-                # 종목 기본 정보 구성
+                # 🔥 정확한 price_change_rate 계산 (일봉 데이터 기반)
+                accurate_price_change_rate = 0.0
+                if yesterday_close > 0 and yesterday_close != current_price:
+                    accurate_price_change_rate = (current_price - yesterday_close) / yesterday_close * 100
+                
+                # 종목 기본 정보 구성 (일봉 데이터 활용)
                 basic_info = {
                     'stock_code': stock_code,
                     'stock_name': stock_name,
                     'current_price': current_price,
-                    'yesterday_close': yesterday_close,
+                    'yesterday_close': yesterday_close,  # 일봉 데이터에서 추출
                     'open_price': float(row.get('stck_oprc', current_price)),
                     'high_price': float(row.get('stck_hgpr', current_price)),
                     'low_price': float(row.get('stck_lwpr', current_price)),
                     'volume': volume,
-                    'yesterday_volume': volume,  # 현재 거래량으로 대체
-                    'price_change': float(row.get('prdy_vrss', 0)),
-                    'price_change_rate': float(row.get('prdy_vrss_sign', 0)),
+                    'yesterday_volume': yesterday_volume,  # 일봉 데이터에서 추출
+                    'price_change': current_price - yesterday_close,  # 정확한 가격 변화량
+                    'price_change_rate': accurate_price_change_rate,  # 정확한 변화율
                     'market_cap': int(row.get('hts_avls', 0)) if 'hts_avls' in row else 0
                 }
                 

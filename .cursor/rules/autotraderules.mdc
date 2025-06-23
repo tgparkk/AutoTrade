@@ -1,0 +1,9 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+-AutoTrade 프로젝트는 한국투자증권 api 를 이용한 데이트레이딩이 목적입니다.
+-프로그램을 시작하고 텔레그램 봇, 웹소켓매니저, 메인루프(주식 매매 관련) 가 실행됩니다.
+-장전 코스피 약 900종목에 대해 조사(markey_scanner.py 의 calculate_comprehensive_score 함수)를 해서 상위 10개 (trading_config.ini 의 max_premarket_selected_stocks 값) 를 정합니다.
+-이후 웹소켓매니저를 통해 실시간 데이터를 받으면서 realtime_monitor.py 의 monitor_cycle 에서 매수준비(process_buy_ready_stocks), 매도준비(process_sell_ready_stocks), 장중스캔(_check_and_run_intraday_scan) 를 합니다.

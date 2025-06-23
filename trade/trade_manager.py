@@ -431,10 +431,10 @@ class TradeManager:
                 
                 # 🔥 핵심 매매 로직 - 장시간 중 주기적 매수/매도 처리
                 is_market_hours = self._is_market_hours()
-                logger.info(f"🔍 디버그: is_market_hours={is_market_hours}, market_monitoring_active={market_monitoring_active}")
+                logger.debug(f"🔍 디버그: is_market_hours={is_market_hours}, market_monitoring_active={market_monitoring_active}")
                 
                 if is_market_hours and market_monitoring_active:
-                    logger.info("✅ 모니터링 사이클 실행 조건 충족 - monitor_cycle() 호출")
+                    logger.debug("✅ 모니터링 사이클 실행 조건 충족 - monitor_cycle() 호출")
                     # 🔥 RealTimeMonitor의 monitor_cycle을 비동기 환경에서 안전하게 실행
                     try:
                         # 동기 메서드를 executor에서 비동기적으로 실행 (메인 루프 블로킹 방지)

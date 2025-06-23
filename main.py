@@ -75,4 +75,6 @@ if __name__ == "__main__":
         sys.exit(0)
     except Exception as e:
         print(f"\n❌ 시스템 실행 오류: {e}")
-        sys.exit(1) 
+        sys.exit(1)
+
+ 
