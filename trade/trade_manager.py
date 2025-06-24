@@ -415,6 +415,9 @@ class TradeManager:
         last_websocket_health_check = None
         websocket_reconnect_attempts = 0
         max_websocket_reconnect_attempts = 3
+        # 🔥 추가: 웹소켓 복구 실패 연속 카운터
+        consecutive_websocket_failures = 0
+        max_consecutive_failures = 5
         
         try:
             while self.is_running and not self.shutdown_event.is_set():
@@ -427,10 +430,29 @@ class TradeManager:
                     
                     websocket_healthy = await self._check_and_recover_websocket()
                     if not websocket_healthy:
+                        consecutive_websocket_failures += 1
                         websocket_reconnect_attempts += 1
-                        logger.warning(f"⚠️ 웹소켓 복구 시도 {websocket_reconnect_attempts}/{max_websocket_reconnect_attempts}")
+                        logger.warning(f"⚠️ 웹소켓 복구 시도 {websocket_reconnect_attempts}/{max_websocket_reconnect_attempts}, "
+                                     f"연속실패 {consecutive_websocket_failures}/{max_consecutive_failures}")
                         
-                        if websocket_reconnect_attempts >= max_websocket_reconnect_attempts:
+                        # 🔥 연속 실패가 많으면 웹소켓 없이 계속 진행
+                        if consecutive_websocket_failures >= max_consecutive_failures:
+                            logger.error(f"❌ 웹소켓 연속 실패 한계 도달 ({max_consecutive_failures}회) - 웹소켓 없이 계속 진행")
+                            # 텔레그램 알림 전송
+                            if self.telegram_bot:
+                                try:
+                                    await self.telegram_bot.send_message(
+                                        f"🚨 웹소켓 연속 실패 {consecutive_websocket_failures}회\n"
+                                        "실시간 데이터 없이 계속 진행 중입니다."
+                                    )
+                                except:
+                                    pass
+                            
+                            # 연속 실패 카운터 리셋 (30분 후 다시 시도하기 위해)
+                            consecutive_websocket_failures = 0
+                            websocket_reconnect_attempts = 0
+                        
+                        elif websocket_reconnect_attempts >= max_websocket_reconnect_attempts:
                             logger.error("❌ 웹소켓 복구 실패 한계 도달 - 시스템 재시작 필요")
                             # 필요시 텔레그램 알림 전송
                             if self.telegram_bot:
@@ -444,7 +466,9 @@ class TradeManager:
                             # 재연결 시도 대기
                             await asyncio.sleep(30)
                     else:
-                        websocket_reconnect_attempts = 0  # 성공시 카운터 리셋
+                        # 웹소켓 정상 - 카운터 리셋
+                        consecutive_websocket_failures = 0
+                        websocket_reconnect_attempts = 0
                     
                     last_websocket_health_check = current_time
                 
@@ -465,13 +489,18 @@ class TradeManager:
                 
                 if is_market_hours and market_monitoring_active:
                     logger.debug("✅ 모니터링 사이클 실행 조건 충족 - monitor_cycle() 호출")
-                    # 🔥 RealTimeMonitor의 monitor_cycle을 비동기 환경에서 안전하게 실행
+                    # 🔥 RealTimeMonitor의 monitor_cycle을 안전하게 실행 (타임아웃 추가)
                     try:
-                        # 동기 메서드를 executor에서 비동기적으로 실행 (메인 루프 블로킹 방지)
-                        await asyncio.get_event_loop().run_in_executor(
-                            None, self.realtime_monitor.monitor_cycle
+                        # 🔥 타임아웃을 추가하여 매매 루프가 무한 대기하지 않도록 보호
+                        await asyncio.wait_for(
+                            asyncio.get_event_loop().run_in_executor(
+                                None, self.realtime_monitor.monitor_cycle
+                            ),
+                            timeout=30.0  # 30초 타임아웃
                         )
                         logger.debug("✅ monitor_cycle() 실행 완료")
+                    except asyncio.TimeoutError:
+                        logger.warning("⚠️ monitor_cycle() 타임아웃 (30초) - 다음 사이클로 건너뜀")
                     except Exception as e:
                         logger.error(f"모니터링 사이클 실행 오류: {e}")
                         # 오류가 발생해도 시스템은 계속 실행
@@ -710,15 +739,16 @@ class TradeManager:
             
             # 1. 기본 연결 상태 확인
             if not self.websocket_manager.is_connected:
-                logger.warning("⚠️ 웹소켓 연결 끊어짐 - 재연결 시도")
-                success = await self._restart_websocket_connection()
-                return success
+                logger.warning("⚠️ 웹소켓 연결 끊어짐 - 백그라운드 재연결 시도")
+                # 🔥 백그라운드에서 재연결 시도 (매매 루프 블로킹 방지)
+                asyncio.create_task(self._background_websocket_recovery())
+                return False  # 재연결 중이므로 일시적으로 False 반환
             
             # 2. 실행 상태 확인
             if not self.websocket_manager.is_running:
-                logger.warning("⚠️ 웹소켓 실행 중지됨 - 재시작 시도")
-                success = await self._restart_websocket_connection()
-                return success
+                logger.warning("⚠️ 웹소켓 실행 중지됨 - 백그라운드 재시작 시도")
+                asyncio.create_task(self._background_websocket_recovery())
+                return False
             
             # 🔥 3. PINGPONG 하트비트 상태 확인 (핵심 개선)
             pingpong_status = self.websocket_manager.get_pingpong_status()
@@ -726,15 +756,15 @@ class TradeManager:
                 pingpong_age = pingpong_status.get('last_pingpong_age', 0)
                 logger.warning(f"⚠️ PINGPONG 하트비트 이상: {pingpong_age:.1f}초 전 마지막 수신")
                 
-                # PINGPONG이 3분 이상 없으면 재연결 시도
+                # PINGPONG이 3분 이상 없으면 백그라운드 재연결 시도
                 if pingpong_age > 180:
-                    logger.warning("❌ PINGPONG 타임아웃 - 재연결 시도")
-                    success = await self._restart_websocket_connection()
-                    return success
+                    logger.warning("❌ PINGPONG 타임아웃 - 백그라운드 재연결 시도")
+                    asyncio.create_task(self._background_websocket_recovery())
+                    return False  # 매매는 계속 진행
                 else:
                     logger.info(f"🔍 PINGPONG 지연 중이지만 허용 범위 ({pingpong_age:.1f}초)")
             
-            # 4. 구독 상태 확인
+            # 4. 구독 상태 확인 (논블로킹)
             selected_stocks = self.stock_manager.get_all_selected_stocks()
             subscribed_stocks = self.websocket_manager.get_subscribed_stocks()
             
@@ -745,7 +775,8 @@ class TradeManager:
             
             if missing_subscriptions:
                 logger.warning(f"⚠️ 웹소켓 구독 누락 종목 발견: {len(missing_subscriptions)}개")
-                await self._resubscribe_missing_stocks(missing_subscriptions)
+                # 🔥 백그라운드에서 재구독 처리
+                asyncio.create_task(self._background_resubscribe(missing_subscriptions))
             
             # 5. 전체 웹소켓 건강 상태 확인
             health_status = self.websocket_manager.get_health_status()
@@ -770,6 +801,27 @@ class TradeManager:
         except Exception as e:
             logger.error(f"❌ 웹소켓 헬스체크 오류: {e}")
             return False
+    
+    async def _background_websocket_recovery(self):
+        """백그라운드에서 웹소켓 복구 (매매 루프 블로킹 방지)"""
+        try:
+            logger.info("🔄 백그라운드 웹소켓 복구 시작...")
+            success = await self._restart_websocket_connection()
+            if success:
+                logger.info("✅ 백그라운드 웹소켓 복구 성공")
+            else:
+                logger.error("❌ 백그라운드 웹소켓 복구 실패")
+        except Exception as e:
+            logger.error(f"❌ 백그라운드 웹소켓 복구 오류: {e}")
+    
+    async def _background_resubscribe(self, missing_stock_codes: List[str]):
+        """백그라운드에서 누락 종목 재구독"""
+        try:
+            logger.info(f"🔄 백그라운드 재구독 시작: {len(missing_stock_codes)}개 종목")
+            await self._resubscribe_missing_stocks(missing_stock_codes)
+            logger.info("✅ 백그라운드 재구독 완료")
+        except Exception as e:
+            logger.error(f"❌ 백그라운드 재구독 오류: {e}")
     
     async def _restart_websocket_connection(self) -> bool:
         """웹소켓 연결 재시작"""

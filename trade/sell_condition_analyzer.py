@@ -87,6 +87,27 @@ class SellConditionAnalyzer:
             if technical_sell_reason:
                 return technical_sell_reason
             
+            # === 우선순위 4-1: 호가잔량 기반 매도 (신규 추가) ===
+            orderbook_sell_reason = SellConditionAnalyzer._check_orderbook_sell_conditions(
+                stock, realtime_data, current_pnl_rate, strategy_config
+            )
+            if orderbook_sell_reason:
+                return orderbook_sell_reason
+            
+            # === 우선순위 4-2: 거래량 패턴 기반 매도 (신규 추가) ===
+            volume_pattern_reason = SellConditionAnalyzer._check_volume_pattern_sell_conditions(
+                stock, realtime_data, holding_minutes, strategy_config
+            )
+            if volume_pattern_reason:
+                return volume_pattern_reason
+            
+            # === 우선순위 4-3: 강화된 체결 불균형 매도 (신규 추가) ===
+            enhanced_contract_reason = SellConditionAnalyzer._check_enhanced_contract_sell_conditions(
+                stock, realtime_data, current_pnl_rate, holding_minutes, strategy_config
+            )
+            if enhanced_contract_reason:
+                return enhanced_contract_reason
+            
             # === 우선순위 5: 고변동성 기반 매도 ===
             volatility_sell_reason = SellConditionAnalyzer._check_volatility_sell_conditions(
                 stock, current_price, volatility, strategy_config
@@ -286,4 +307,162 @@ class SellConditionAnalyzer:
             
         except Exception as e:
             logger.debug(f"가격 급락 보호 매도 조건 확인 실패 {stock.stock_code}: {e}")
+            return None
+    
+    @staticmethod
+    def _check_orderbook_sell_conditions(stock: Stock, realtime_data: Dict, 
+                                       current_pnl_rate: float, strategy_config: Dict) -> Optional[str]:
+        """호가잔량 기반 매도 조건 확인 (신규 추가)"""
+        try:
+            # 호가잔량 데이터 추출
+            total_ask_qty = getattr(stock.realtime_data, 'total_ask_qty', 0)
+            total_bid_qty = getattr(stock.realtime_data, 'total_bid_qty', 0)
+            
+            if total_ask_qty <= 0 or total_bid_qty <= 0:
+                return None
+            
+            # 1. 매도호가 급증 (매도압력 3배 이상)
+            ask_bid_ratio = total_ask_qty / total_bid_qty
+            high_ask_pressure_threshold = strategy_config.get('high_ask_pressure_threshold', 3.0)
+            
+            if ask_bid_ratio >= high_ask_pressure_threshold:
+                # 손실 상황이거나 소폭 이익일 때만 매도
+                max_profit_for_ask_sell = strategy_config.get('max_profit_for_ask_sell', 1.5)
+                if current_pnl_rate <= max_profit_for_ask_sell:
+                    return "high_ask_pressure"
+            
+            # 2. 매수호가 급감 (매수 관심 급락)
+            bid_ask_ratio = total_bid_qty / total_ask_qty
+            low_bid_interest_threshold = strategy_config.get('low_bid_interest_threshold', 0.3)
+            
+            if bid_ask_ratio <= low_bid_interest_threshold:
+                # 약간의 손실이라도 매도
+                min_loss_for_bid_sell = strategy_config.get('min_loss_for_bid_sell', -0.5)
+                if current_pnl_rate <= min_loss_for_bid_sell:
+                    return "low_bid_interest"
+            
+            # 3. 호가 스프레드 급확대 (유동성 부족)
+            bid_price = realtime_data.get('bid_price', 0) or getattr(stock.realtime_data, 'bid_price', 0)
+            ask_price = realtime_data.get('ask_price', 0) or getattr(stock.realtime_data, 'ask_price', 0)
+            
+            if bid_price > 0 and ask_price > 0:
+                spread_rate = (ask_price - bid_price) / bid_price
+                wide_spread_threshold = strategy_config.get('wide_spread_threshold', 0.03)  # 3%
+                
+                if spread_rate >= wide_spread_threshold:
+                    # 유동성 부족으로 매도 어려워질 수 있으니 빠른 매도
+                    return "wide_spread_liquidity"
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"호가잔량 매도 조건 확인 실패 {stock.stock_code}: {e}")
+            return None
+    
+    @staticmethod
+    def _check_volume_pattern_sell_conditions(stock: Stock, realtime_data: Dict,
+                                            holding_minutes: float, strategy_config: Dict) -> Optional[str]:
+        """거래량 패턴 기반 매도 조건 확인 (신규 추가)"""
+        try:
+            # 거래량 관련 데이터 추출
+            volume_turnover_rate = getattr(stock.realtime_data, 'volume_turnover_rate', 0.0)
+            prev_same_time_volume_rate = getattr(stock.realtime_data, 'prev_same_time_volume_rate', 100.0)
+            current_volume = getattr(stock.realtime_data, 'today_volume', 0)
+            
+            # 1. 거래량 급감 (관심 상실)
+            volume_drying_threshold = strategy_config.get('volume_drying_threshold', 0.4)  # 40%
+            min_holding_for_volume_check = strategy_config.get('min_holding_for_volume_check', 15)  # 15분
+            
+            if (holding_minutes >= min_holding_for_volume_check and 
+                prev_same_time_volume_rate <= volume_drying_threshold * 100):
+                return "volume_drying_up"
+            
+            # 2. 거래량 회전율 급락
+            low_turnover_threshold = strategy_config.get('low_turnover_threshold', 0.5)  # 0.5%
+            if volume_turnover_rate <= low_turnover_threshold:
+                # 30분 이상 보유한 경우에만 적용
+                min_holding_for_turnover = strategy_config.get('min_holding_for_turnover', 30)
+                if holding_minutes >= min_holding_for_turnover:
+                    return "low_volume_turnover"
+            
+            # 3. 장중 거래량 패턴 분석 (간단한 버전)
+            # 현재 시간대에 거래량이 너무 적으면 관심 상실로 판단
+            current_hour = now_kst().hour
+            if 10 <= current_hour <= 14:  # 활발한 거래 시간대
+                expected_min_volume_ratio = strategy_config.get('expected_min_volume_ratio', 0.8)
+                if prev_same_time_volume_rate <= expected_min_volume_ratio * 100:
+                    # 거래량이 전일 동시간 대비 80% 미만이면 관심 상실
+                    min_holding_for_pattern = strategy_config.get('min_holding_for_pattern', 45)
+                    if holding_minutes >= min_holding_for_pattern:
+                        return "volume_pattern_weak"
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"거래량 패턴 매도 조건 확인 실패 {stock.stock_code}: {e}")
+            return None
+    
+    @staticmethod
+    def _check_enhanced_contract_sell_conditions(stock: Stock, realtime_data: Dict,
+                                               current_pnl_rate: float, holding_minutes: float, 
+                                               strategy_config: Dict) -> Optional[str]:
+        """강화된 체결 불균형 매도 조건 확인 (신규 추가)"""
+        try:
+            # 체결 데이터 추출
+            sell_contract_count = getattr(stock.realtime_data, 'sell_contract_count', 0)
+            buy_contract_count = getattr(stock.realtime_data, 'buy_contract_count', 0)
+            contract_strength = getattr(stock.realtime_data, 'contract_strength', 100.0)
+            
+            total_contracts = sell_contract_count + buy_contract_count
+            if total_contracts <= 0:
+                return None
+            
+            # 1. 연속 매도체결 우세 (70% 이상 매도체결)
+            sell_contract_ratio = sell_contract_count / total_contracts
+            sell_dominance_threshold = strategy_config.get('sell_dominance_threshold', 0.7)
+            min_holding_for_contract = strategy_config.get('min_holding_for_contract', 20)  # 20분
+            
+            if (sell_contract_ratio >= sell_dominance_threshold and 
+                holding_minutes >= min_holding_for_contract):
+                return "sell_contract_dominance"
+            
+            # 2. 체결강도 급락 + 시간 요소 결합 (기존 조건 강화)
+            weak_strength_enhanced_threshold = strategy_config.get('weak_strength_enhanced_threshold', 70.0)
+            strength_time_threshold = strategy_config.get('strength_time_threshold', 30)  # 30분
+            
+            if (contract_strength <= weak_strength_enhanced_threshold and 
+                holding_minutes >= strength_time_threshold):
+                # 손실이 아니어도 장시간 보유시 매도 고려
+                max_profit_for_weak_strength = strategy_config.get('max_profit_for_weak_strength', 0.8)
+                if current_pnl_rate <= max_profit_for_weak_strength:
+                    return "weak_strength_prolonged"
+            
+            # 3. 급격한 체결강도 하락 감지 (단기간 내 급락)
+            # 이전 값과 비교는 복잡하므로, 현재는 절대값 기준으로 판단
+            very_weak_strength_threshold = strategy_config.get('very_weak_strength_threshold', 60.0)
+            immediate_strength_check = strategy_config.get('immediate_strength_check', 10)  # 10분
+            
+            if (contract_strength <= very_weak_strength_threshold and 
+                holding_minutes >= immediate_strength_check):
+                # 매우 약한 체결강도는 즉시 매도 고려
+                if current_pnl_rate <= 0:  # 손실이거나 본전일 때
+                    return "very_weak_strength"
+            
+            # 4. 체결 불균형 + 호가 불균형 결합 조건
+            total_ask_qty = getattr(stock.realtime_data, 'total_ask_qty', 0)
+            total_bid_qty = getattr(stock.realtime_data, 'total_bid_qty', 0)
+            
+            if total_ask_qty > 0 and total_bid_qty > 0:
+                ask_bid_qty_ratio = total_ask_qty / total_bid_qty
+                combined_sell_pressure_threshold = strategy_config.get('combined_sell_pressure_threshold', 2.0)
+                
+                if (sell_contract_ratio >= 0.6 and  # 매도체결 60% 이상
+                    ask_bid_qty_ratio >= combined_sell_pressure_threshold and  # 매도호가 2배 이상
+                    current_pnl_rate <= 1.0):  # 1% 이하 수익일 때
+                    return "combined_sell_pressure"
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"강화된 체결 불균형 매도 조건 확인 실패 {stock.stock_code}: {e}")
             return None

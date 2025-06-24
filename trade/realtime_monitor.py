@@ -540,6 +540,13 @@ class RealTimeMonitor:
     
     def monitor_cycle(self):
         """모니터링 사이클 실행 (웹소켓 기반 최적화)"""
+        # 🔥 동시 실행 방지 (스레드 안전성 보장)
+        if hasattr(self, '_cycle_executing') and self._cycle_executing:
+            logger.debug("⚠️ 이전 monitor_cycle() 아직 실행 중 - 이번 사이클 건너뜀")
+            return
+        
+        self._cycle_executing = True
+        
         try:
             self._market_scan_count += 1
             
@@ -606,13 +613,16 @@ class RealTimeMonitor:
                 self._log_status_report(buy_result, sell_result)
             
             # 🔥 주기적 메모리 정리 (1시간마다)
-            memory_cleanup_seconds = 3600  # 1시간
+            memory_cleanup_seconds = 3600
             memory_cleanup_interval = max(1, round(memory_cleanup_seconds / self.current_monitoring_interval))
             if self._market_scan_count % memory_cleanup_interval == 0:
                 self._cleanup_expired_data()
                 
         except Exception as e:
             logger.error(f"모니터링 사이클 오류: {e}")
+        finally:
+            # 🔥 반드시 실행 플래그 해제 (예외 발생시에도)
+            self._cycle_executing = False
     
     def _log_performance_metrics(self):
         """성능 지표 로깅 (웹소켓 기반)"""
