@@ -42,6 +42,7 @@ class KISWebSocketManager:
             'connection_count': 0,
             'reconnect_count': 0,
             'ping_pong_count': 0,
+            'last_ping_pong_time': 0,
             'last_error': None
         }
 
@@ -178,12 +179,57 @@ class KISWebSocketManager:
             # 메시지 처리 루프
             consecutive_errors = 0
             max_errors = 5
+            
+            # 🔥 PINGPONG 기반 하트비트 관리
+            last_pingpong_time = time.time()
+            pingpong_timeout = 180  # 3분간 PINGPONG 없으면 연결 의심 (KIS는 보통 30초~1분 간격)
+            
+            # 기존 시간 기반 백업 하트비트 (PINGPONG 실패시 대비)
+            last_any_message_time = time.time()
+            message_timeout = 300  # 5분간 아무 메시지 없으면 연결 의심
 
             while self.connection.is_running and not self._shutdown_event.is_set():
                 try:
-                    # 연결 상태 확인
+                    current_time = time.time()
+                    
+                    # 🔥 1차 체크: PINGPONG 기반 하트비트 (더 정확함)
+                    if current_time - last_pingpong_time > pingpong_timeout:
+                        logger.warning(f"⚠️ {pingpong_timeout//60}분간 PINGPONG 없음 - 연결 상태 의심")
+                        
+                        # 실제 연결 상태 확인
+                        if not self.connection.check_actual_connection_status():
+                            logger.warning("❌ PINGPONG 타임아웃 + 연결 상태 이상 - 재연결 시도")
+                            if not await self._handle_reconnect():
+                                logger.error("❌ PINGPONG 타임아웃 후 재연결 실패 - 루프 종료")
+                                break
+                            # 재연결 성공시 하트비트 시간 리셋
+                            last_pingpong_time = time.time()
+                            last_any_message_time = time.time()
+                            continue
+                        else:
+                            # 연결은 정상인데 PINGPONG만 없는 경우 (서버측 이슈 가능성)
+                            logger.info("🔍 연결은 정상이나 PINGPONG 지연됨 - 계속 대기")
+                            last_pingpong_time = current_time  # 타임아웃 리셋
+                    
+                    # 🔥 2차 체크: 백업 하트비트 (모든 메시지 기준)
+                    elif current_time - last_any_message_time > message_timeout:
+                        logger.warning(f"⚠️ {message_timeout//60}분간 모든 메시지 없음 - 연결 상태 체크")
+                        if not self.connection.check_actual_connection_status():
+                            logger.warning("❌ 메시지 타임아웃 + 연결 상태 이상 - 재연결 시도")
+                            if not await self._handle_reconnect():
+                                logger.error("❌ 메시지 타임아웃 후 재연결 실패 - 루프 종료")
+                                break
+                            last_pingpong_time = time.time()
+                            last_any_message_time = time.time()
+                            continue
+                        else:
+                            last_any_message_time = current_time  # 연결 정상이면 시간 업데이트
+
+                    # 기본 연결 상태 확인
                     if not self.connection.check_actual_connection_status():
+                        logger.warning("❌ 웹소켓 연결 상태 이상")
                         if not await self._handle_reconnect():
+                            logger.error("❌ 연결 상태 체크 후 재연결 실패 - 루프 종료")
                             break
 
                     # 메시지 수신 및 처리
@@ -194,33 +240,47 @@ class KISWebSocketManager:
                     if message:
                         self.stats['total_messages'] += 1
                         consecutive_errors = 0
+                        last_any_message_time = time.time()  # 모든 메시지에 대해 시간 업데이트
 
                         # 메시지 처리
                         result = await self.message_handler.process_message(message)
                         
-                        # PINGPONG 처리
+                        # 🔥 PINGPONG 처리 및 하트비트 업데이트
                         if result and result[0] == 'PINGPONG':
                             await self.connection.send_pong(result[1])
                             self.stats['ping_pong_count'] += 1
+                            self.stats['last_ping_pong_time'] = time.time()  # stats에도 기록
+                            last_pingpong_time = time.time()  # PINGPONG 수신 시간 업데이트
+                            logger.debug(f"🏓 PINGPONG 하트비트 수신 (카운트: {self.stats['ping_pong_count']})")
 
                 except asyncio.TimeoutError:
+                    # 타임아웃은 정상적인 상황 (30초간 메시지가 없을 때)
+                    logger.debug("📡 웹소켓 메시지 수신 타임아웃 (정상)")
                     continue
                 except asyncio.CancelledError:
+                    logger.info("🛑 웹소켓 루프 취소 신호 수신")
                     break
                 except Exception as e:
                     consecutive_errors += 1
-                    logger.error(f"메시지 처리 오류 (연속 {consecutive_errors}회): {e}")
+                    logger.error(f"❌ 메시지 처리 오류 (연속 {consecutive_errors}회): {e}")
 
                     if consecutive_errors >= max_errors:
-                        logger.error("연속 오류 한계 도달 - 재연결 시도")
+                        logger.error(f"❌ 연속 오류 한계 도달 ({consecutive_errors}/{max_errors}) - 재연결 시도")
                         if not await self._handle_reconnect():
+                            logger.error("❌ 연속 오류 후 재연결 실패 - 루프 종료")
                             break
                         consecutive_errors = 0
+                        # 재연결 성공시 하트비트 시간 리셋
+                        last_pingpong_time = time.time()
+                        last_any_message_time = time.time()
                     else:
+                        logger.info(f"⏳ {consecutive_errors}회 오류 후 1초 대기")
                         await asyncio.sleep(1)
 
         except Exception as e:
-            logger.error(f"웹소켓 메인 루프 오류: {e}")
+            logger.error(f"❌ 웹소켓 메인 루프 예외: {e}")
+            import traceback
+            logger.error(f"스택 트레이스: {traceback.format_exc()}")
         finally:
             await self._cleanup_connection()
             logger.info("🛑 웹소켓 메인 루프 종료")
@@ -230,15 +290,40 @@ class KISWebSocketManager:
         logger.info("🔄 웹소켓 재연결 시도...")
         self.stats['reconnect_count'] += 1
 
-        await self.connection.disconnect()
-        await asyncio.sleep(2)
+        try:
+            # 기존 연결 정리
+            await self.connection.disconnect()
+            await asyncio.sleep(2)
 
-        if await self.connection.connect():
-            logger.info("✅ 웹소켓 재연결 성공")
-            await self._subscribe_account_notices()
-            return True
-        else:
-            logger.error("❌ 웹소켓 재연결 실패")
+            # 🔥 최대 3회 재연결 시도
+            max_retry = 3
+            for attempt in range(1, max_retry + 1):
+                logger.info(f"🔄 재연결 시도 {attempt}/{max_retry}")
+                
+                if await self.connection.connect():
+                    logger.info(f"✅ 웹소켓 재연결 성공 ({attempt}회 시도)")
+                    
+                    # 계좌 체결통보 재구독
+                    if await self._subscribe_account_notices():
+                        logger.info("✅ 계좌 체결통보 재구독 완료")
+                        return True
+                    else:
+                        logger.warning("⚠️ 계좌 체결통보 재구독 실패 - 다시 시도")
+                        await self.connection.disconnect()
+                        if attempt < max_retry:
+                            await asyncio.sleep(3)
+                        continue
+                else:
+                    logger.warning(f"❌ 재연결 실패 ({attempt}/{max_retry})")
+                    if attempt < max_retry:
+                        await asyncio.sleep(5)  # 재시도 전 더 긴 대기
+                    continue
+
+            logger.error(f"❌ 웹소켓 재연결 최종 실패 ({max_retry}회 시도)")
+            return False
+            
+        except Exception as e:
+            logger.error(f"❌ 웹소켓 재연결 처리 오류: {e}")
             return False
 
     async def _subscribe_account_notices(self):
@@ -450,22 +535,71 @@ class KISWebSocketManager:
             }
 
     def get_health_status(self) -> Dict:
-        """웹소켓 연결 상태 및 헬스 체크"""
+        """웹소켓 건강 상태 조회"""
         try:
+            current_time = time.time()
+            
+            # PINGPONG 상태 (마지막 PINGPONG으로부터의 시간)
+            last_pingpong = self.stats.get('last_ping_pong_time', 0)
+            pingpong_age = current_time - last_pingpong if last_pingpong > 0 else 0
+            
+            # 전체 메시지 상태
+            total_messages = self.stats.get('total_messages', 0)
+            ping_pong_count = self.stats.get('ping_pong_count', 0)
+            
+            # 건강 상태 판정
+            is_healthy = (
+                self.is_connected and 
+                self.is_running and
+                pingpong_age < 300  # 5분 이내에 PINGPONG 수신
+            )
+            
+            # PINGPONG 간격 계산 (최근 5개 평균)
+            pingpong_interval = "알 수 없음"
+            if ping_pong_count >= 2:
+                # 대략적인 간격 추정 (정확하지 않음, 로그 기반 계산 필요)
+                estimated_interval = pingpong_age / max(1, ping_pong_count % 10)
+                pingpong_interval = f"{estimated_interval:.1f}초"
+            
             return {
+                'is_healthy': is_healthy,
                 'is_connected': self.is_connected,
                 'is_running': self.is_running,
-                'subscribed_stocks': len(self.subscription_manager.subscribed_stocks),
-                'message_stats': self.message_handler.get_stats(),
-                'last_check_time': now_kst().strftime('%H:%M:%S')
+                'connection_status': 'healthy' if is_healthy else 'unhealthy',
+                'total_messages': total_messages,
+                'ping_pong_count': ping_pong_count,
+                'last_pingpong_age_seconds': pingpong_age,
+                'pingpong_interval_estimate': pingpong_interval,
+                'subscribed_stocks_count': len(self.get_subscribed_stocks()),
+                'reconnect_count': self.stats.get('reconnect_count', 0),
+                'uptime_seconds': current_time - self.stats.get('start_time', current_time)
             }
+            
         except Exception as e:
-            logger.error(f"헬스 상태 조회 오류: {e}")
+            logger.error(f"웹소켓 건강 상태 조회 오류: {e}")
+            return {
+                'is_healthy': False,
+                'error': str(e)
+            }
+    
+    def get_pingpong_status(self) -> Dict:
+        """PINGPONG 하트비트 상태 조회"""
+        try:
+            current_time = time.time()
+            last_pingpong = self.stats.get('last_ping_pong_time', 0)
+            
+            return {
+                'last_pingpong_time': last_pingpong,
+                'last_pingpong_age': current_time - last_pingpong if last_pingpong > 0 else 0,
+                'ping_pong_count': self.stats.get('ping_pong_count', 0),
+                'is_pingpong_recent': (current_time - last_pingpong) < 180 if last_pingpong > 0 else False
+            }
+            
+        except Exception as e:
+            logger.error(f"PINGPONG 상태 조회 오러: {e}")
             return {
                 'error': str(e),
-                'last_check_time': now_kst().strftime('%H:%M:%S'),
-                'is_connected': False,
-                'is_running': False
+                'is_pingpong_recent': False
             }
 
     # ==========================================

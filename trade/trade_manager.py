@@ -412,11 +412,41 @@ class TradeManager:
         # 2. 메인 루프 변수 초기화
         last_scan_date = None
         market_monitoring_active = True
+        last_websocket_health_check = None
+        websocket_reconnect_attempts = 0
+        max_websocket_reconnect_attempts = 3
         
         try:
             while self.is_running and not self.shutdown_event.is_set():
                 current_time = now_kst()
                 current_date = current_time.date()
+                
+                # 🔥 웹소켓 헬스체크 및 자동 재시작 (5분마다)
+                if (last_websocket_health_check is None or 
+                    (current_time - last_websocket_health_check).total_seconds() >= 300):
+                    
+                    websocket_healthy = await self._check_and_recover_websocket()
+                    if not websocket_healthy:
+                        websocket_reconnect_attempts += 1
+                        logger.warning(f"⚠️ 웹소켓 복구 시도 {websocket_reconnect_attempts}/{max_websocket_reconnect_attempts}")
+                        
+                        if websocket_reconnect_attempts >= max_websocket_reconnect_attempts:
+                            logger.error("❌ 웹소켓 복구 실패 한계 도달 - 시스템 재시작 필요")
+                            # 필요시 텔레그램 알림 전송
+                            if self.telegram_bot:
+                                try:
+                                    await self.telegram_bot.send_message(
+                                        "🚨 웹소켓 연결 복구 실패\n시스템 재시작이 필요할 수 있습니다."
+                                    )
+                                except:
+                                    pass
+                        else:
+                            # 재연결 시도 대기
+                            await asyncio.sleep(30)
+                    else:
+                        websocket_reconnect_attempts = 0  # 성공시 카운터 리셋
+                    
+                    last_websocket_health_check = current_time
                 
                 # 장시작전 스캔 처리
                 if self._should_run_pre_market() and last_scan_date != current_date:
@@ -441,7 +471,7 @@ class TradeManager:
                         await asyncio.get_event_loop().run_in_executor(
                             None, self.realtime_monitor.monitor_cycle
                         )
-                        logger.info("✅ monitor_cycle() 실행 완료")
+                        logger.debug("✅ monitor_cycle() 실행 완료")
                     except Exception as e:
                         logger.error(f"모니터링 사이클 실행 오류: {e}")
                         # 오류가 발생해도 시스템은 계속 실행
@@ -669,4 +699,156 @@ class TradeManager:
         status = "실행중" if self.is_running else "중지"
         selected_count = len(self.stock_manager.get_all_selected_stocks())
         websocket_status = "연결" if self.websocket_manager and self.websocket_manager.is_connected else "미연결"
-        return f"TradeManager(상태: {status}, 선정종목: {selected_count}개, 웹소켓: {websocket_status})" 
+        return f"TradeManager(상태: {status}, 선정종목: {selected_count}개, 웹소켓: {websocket_status})"
+
+    async def _check_and_recover_websocket(self) -> bool:
+        """웹소켓 헬스체크 및 자동 복구 (PINGPONG 기반)"""
+        try:
+            if not self.websocket_manager:
+                logger.warning("⚠️ 웹소켓 매니저가 초기화되지 않음")
+                return False
+            
+            # 1. 기본 연결 상태 확인
+            if not self.websocket_manager.is_connected:
+                logger.warning("⚠️ 웹소켓 연결 끊어짐 - 재연결 시도")
+                success = await self._restart_websocket_connection()
+                return success
+            
+            # 2. 실행 상태 확인
+            if not self.websocket_manager.is_running:
+                logger.warning("⚠️ 웹소켓 실행 중지됨 - 재시작 시도")
+                success = await self._restart_websocket_connection()
+                return success
+            
+            # 🔥 3. PINGPONG 하트비트 상태 확인 (핵심 개선)
+            pingpong_status = self.websocket_manager.get_pingpong_status()
+            if not pingpong_status.get('is_pingpong_recent', False):
+                pingpong_age = pingpong_status.get('last_pingpong_age', 0)
+                logger.warning(f"⚠️ PINGPONG 하트비트 이상: {pingpong_age:.1f}초 전 마지막 수신")
+                
+                # PINGPONG이 3분 이상 없으면 재연결 시도
+                if pingpong_age > 180:
+                    logger.warning("❌ PINGPONG 타임아웃 - 재연결 시도")
+                    success = await self._restart_websocket_connection()
+                    return success
+                else:
+                    logger.info(f"🔍 PINGPONG 지연 중이지만 허용 범위 ({pingpong_age:.1f}초)")
+            
+            # 4. 구독 상태 확인
+            selected_stocks = self.stock_manager.get_all_selected_stocks()
+            subscribed_stocks = self.websocket_manager.get_subscribed_stocks()
+            
+            missing_subscriptions = []
+            for stock in selected_stocks:
+                if stock.stock_code not in subscribed_stocks:
+                    missing_subscriptions.append(stock.stock_code)
+            
+            if missing_subscriptions:
+                logger.warning(f"⚠️ 웹소켓 구독 누락 종목 발견: {len(missing_subscriptions)}개")
+                await self._resubscribe_missing_stocks(missing_subscriptions)
+            
+            # 5. 전체 웹소켓 건강 상태 확인
+            health_status = self.websocket_manager.get_health_status()
+            is_healthy = health_status.get('is_healthy', False)
+            
+            if is_healthy:
+                # 상세한 상태 로깅 (5분마다 한 번만)
+                ping_pong_count = health_status.get('ping_pong_count', 0)
+                total_messages = health_status.get('total_messages', 0)
+                subscribed_count = len(subscribed_stocks)
+                
+                logger.debug(f"✅ 웹소켓 헬스체크 정상: 연결={self.websocket_manager.is_connected}, "
+                            f"실행={self.websocket_manager.is_running}, "
+                            f"PINGPONG={ping_pong_count}회, "
+                            f"메시지={total_messages}개, "
+                            f"구독={subscribed_count}개")
+                return True
+            else:
+                logger.warning(f"⚠️ 웹소켓 건강 상태 이상: {health_status}")
+                return False
+            
+        except Exception as e:
+            logger.error(f"❌ 웹소켓 헬스체크 오류: {e}")
+            return False
+    
+    async def _restart_websocket_connection(self) -> bool:
+        """웹소켓 연결 재시작"""
+        try:
+            logger.info("🔄 웹소켓 연결 재시작 시도...")
+            
+            # 1. 기존 웹소켓 정리
+            if self.websocket_manager:
+                try:
+                    self.websocket_manager.safe_cleanup()
+                except Exception as cleanup_error:
+                    logger.error(f"기존 웹소켓 정리 오류: {cleanup_error}")
+            
+            # 2. 새로운 웹소켓 매니저 초기화
+            self.websocket_manager = await self._init_websocket_manager_async()
+            
+            # 3. MarketScanner에 새 웹소켓 매니저 설정
+            if self.market_scanner:
+                self.market_scanner.set_websocket_manager(self.websocket_manager)
+            
+            # 4. 선정된 종목 재구독
+            selected_stocks = self.stock_manager.get_all_selected_stocks()
+            if selected_stocks:
+                logger.info(f"📡 선정 종목 재구독 시작: {len(selected_stocks)}개")
+                await self._resubscribe_all_stocks(selected_stocks)
+            
+            logger.info("✅ 웹소켓 연결 재시작 완료")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ 웹소켓 연결 재시작 실패: {e}")
+            return False
+    
+    async def _resubscribe_missing_stocks(self, missing_stock_codes: List[str]):
+        """누락된 종목 재구독"""
+        try:
+            if not self.websocket_manager:
+                logger.warning("웹소켓 매니저가 없어 종목 재구독을 건너뜁니다")
+                return
+                
+            for stock_code in missing_stock_codes:
+                try:
+                    # 웹소켓 매니저를 통한 직접 구독
+                    success = await self.websocket_manager.subscribe_stock(stock_code)
+                    if success:
+                        logger.info(f"✅ 종목 재구독 성공: {stock_code}")
+                    else:
+                        logger.warning(f"❌ 종목 재구독 실패: {stock_code}")
+                    
+                    # 구독 요청 간 간격
+                    await asyncio.sleep(0.1)
+                    
+                except Exception as e:
+                    logger.error(f"종목 재구독 오류 ({stock_code}): {e}")
+                    
+        except Exception as e:
+            logger.error(f"누락 종목 재구독 처리 오류: {e}")
+    
+    async def _resubscribe_all_stocks(self, selected_stocks):
+        """모든 선정 종목 재구독"""
+        try:
+            if not self.websocket_manager:
+                logger.warning("웹소켓 매니저가 없어 종목 재구독을 건너뜁니다")
+                return
+                
+            for stock in selected_stocks:
+                try:
+                    # 웹소켓 매니저를 통한 직접 구독
+                    success = await self.websocket_manager.subscribe_stock(stock.stock_code)
+                    if success:
+                        logger.info(f"✅ 종목 재구독 성공: {stock.stock_code}")
+                    else:
+                        logger.warning(f"❌ 종목 재구독 실패: {stock.stock_code}")
+                    
+                    # 구독 요청 간 간격
+                    await asyncio.sleep(0.1)
+                    
+                except Exception as e:
+                    logger.error(f"종목 재구독 오류 ({stock.stock_code}): {e}")
+                    
+        except Exception as e:
+            logger.error(f"전체 종목 재구독 처리 오류: {e}") 

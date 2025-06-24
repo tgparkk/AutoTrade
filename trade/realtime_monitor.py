@@ -119,6 +119,68 @@ class RealTimeMonitor:
         
         logger.info("RealTimeMonitor 초기화 완료 (웹소켓 기반 최적화 버전 + 장중추가스캔)")
     
+    @property
+    def is_monitoring(self) -> bool:
+        """모니터링 상태 확인"""
+        return self._is_monitoring.is_set()
+    
+    @is_monitoring.setter
+    def is_monitoring(self, value: bool):
+        """모니터링 상태 설정"""
+        if value:
+            self._is_monitoring.set()
+        else:
+            self._is_monitoring.clear()
+    
+    @property
+    def market_scan_count(self) -> int:
+        """시장 스캔 횟수"""
+        with self._stats_lock:
+            return self._market_scan_count
+    
+    @market_scan_count.setter
+    def market_scan_count(self, value: int):
+        """시장 스캔 횟수 설정"""
+        with self._stats_lock:
+            self._market_scan_count = value
+    
+    @property
+    def buy_signals_detected(self) -> int:
+        """매수 신호 탐지 횟수"""
+        with self._stats_lock:
+            return self._buy_signals_detected
+    
+    @buy_signals_detected.setter
+    def buy_signals_detected(self, value: int):
+        """매수 신호 탐지 횟수 설정"""
+        with self._stats_lock:
+            self._buy_signals_detected = value
+    
+    @property
+    def sell_signals_detected(self) -> int:
+        """매도 신호 탐지 횟수"""
+        with self._stats_lock:
+            return self._sell_signals_detected
+    
+    @sell_signals_detected.setter
+    def sell_signals_detected(self, value: int):
+        """매도 신호 탐지 횟수 설정"""
+        with self._stats_lock:
+            self._sell_signals_detected = value
+    
+    @property
+    def orders_executed(self) -> int:
+        """실행된 주문 수"""
+        with self._stats_lock:
+            return self._buy_orders_executed + self._sell_orders_executed
+    
+    @orders_executed.setter
+    def orders_executed(self, value: int):
+        """실행된 주문 수 설정"""
+        with self._stats_lock:
+            self._buy_orders_executed = value
+            self._sell_orders_executed = 0
+    
     def is_market_open(self) -> bool:
         """시장 개장 여부 확인
         
