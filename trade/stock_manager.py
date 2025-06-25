@@ -1111,7 +1111,7 @@ class StockManager:
             logger.debug(f"호가 데이터 구조: {data}")
     
     def handle_execution_notice(self, data_type: str, data: Dict):
-        """체결 통보 처리 - 실제 종목 상태 업데이트"""
+        """체결 통보 처리 - KIS 공식 문서 기준 필드명 사용"""
         try:
             # 체결통보 데이터는 'data' 키 안에 중첩되어 있을 수 있음
             actual_data = data.get('data', data)
@@ -1119,8 +1119,61 @@ class StockManager:
             # 데이터가 문자열인 경우 파싱이 필요할 수 있음
             if isinstance(actual_data, str):
                 logger.debug(f"체결통보 원본 데이터: {actual_data}")
-                return
+                
+                # 🔥 KIS 공식 문서 기준 체결통보 파싱 (wikidocs 참조)
+                # menulist = "고객ID|계좌번호|주문번호|원주문번호|매도매수구분|정정구분|주문종류|주문조건|주식단축종목코드|체결수량|체결단가|주식체결시간|거부여부|체결여부|접수여부|지점번호|주문수량|계좌명|체결종목명|신용구분|신용대출일자|체결종목명40|주문가격"
+                parts = actual_data.split('^')
+                if len(parts) >= 23:  # 최소 필드 수 확인
+                    # KIS 공식 순서대로 파싱
+                    customer_id = parts[0]           # 고객ID
+                    account_no = parts[1]            # 계좌번호
+                    order_no = parts[2]              # 주문번호
+                    orig_order_no = parts[3]         # 원주문번호
+                    sell_buy_dvsn = parts[4]         # 매도매수구분 (01:매도, 02:매수)
+                    ord_dvsn = parts[5]              # 정정구분
+                    ord_kind = parts[6]              # 주문종류
+                    ord_cond = parts[7]              # 주문조건
+                    stock_code = parts[8]            # 주식단축종목코드
+                    exec_qty = int(parts[9]) if parts[9] else 0        # 체결수량
+                    exec_price = float(parts[10]) if parts[10] else 0  # 체결단가
+                    exec_time = parts[11]            # 주식체결시간
+                    reject_yn = parts[12]            # 거부여부
+                    exec_yn = parts[13]              # 체결여부
+                    receipt_yn = parts[14]           # 접수여부
+                    branch_no = parts[15]            # 지점번호
+                    ord_qty = int(parts[16]) if parts[16] else 0       # 주문수량
+                    account_name = parts[17]         # 계좌명
+                    exec_stock_name = parts[18]      # 체결종목명
+                    credit_dvsn = parts[19]          # 신용구분
+                    credit_loan_date = parts[20]     # 신용대출일자
+                    exec_stock_name_40 = parts[21]   # 체결종목명40
+                    ord_price = float(parts[22]) if parts[22] else 0   # 주문가격
+                    
+                    # 파싱된 데이터로 체결통보 정보 구성
+                    parsed_notice = {
+                        'mksc_shrn_iscd': stock_code,        # 종목코드
+                        'exec_prce': exec_price,             # 체결가격
+                        'exec_qty': exec_qty,                # 체결수량
+                        'sll_buy_dvsn_cd': sell_buy_dvsn,    # 매도매수구분
+                        'ord_no': order_no,                  # 주문번호
+                        'ord_gno_brno': branch_no,           # 주문채번지점번호
+                        'exec_time': exec_time,              # 체결시간
+                        'reject_yn': reject_yn,              # 거부여부
+                        'exec_yn': exec_yn,                  # 체결여부
+                        'receipt_yn': receipt_yn,            # 접수여부
+                        'account_no': account_no,            # 계좌번호
+                        'customer_id': customer_id,          # 고객ID
+                        'ord_qty': ord_qty,                  # 주문수량
+                        'ord_price': ord_price,              # 주문가격
+                        'exec_stock_name': exec_stock_name,  # 종목명
+                        'timestamp': now_kst()               # 처리시간
+                    }
+                    actual_data = parsed_notice
+                else:
+                    logger.warning(f"체결통보 필드 부족: {len(parts)}개 (최소 23개 필요)")
+                    return
             
+            # 기존 로직과 호환되도록 처리
             stock_code = actual_data.get('mksc_shrn_iscd', '').strip()
             if not stock_code or stock_code not in self.trading_status:
                 logger.debug(f"체결통보 - 관리 대상이 아닌 종목: {stock_code}")
@@ -1150,6 +1203,8 @@ class StockManager:
         except Exception as e:
             logger.error(f"체결 통보 처리 오류: {e}")
             logger.debug(f"체결통보 데이터 구조: {data}")
+            import traceback
+            logger.debug(f"스택 트레이스: {traceback.format_exc()}")
     
     def _handle_buy_execution(self, stock_code: str, exec_price: float, exec_qty: int, ord_type: str):
         """매수 체결 처리"""

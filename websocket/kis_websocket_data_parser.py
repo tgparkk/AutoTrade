@@ -57,7 +57,7 @@ class KISWebSocketDataParser:
         logger.info("체결통보 암호화 키 설정 완료")
 
     def parse_contract_data(self, data: str) -> Dict:
-        """실시간 체결 데이터 파싱 (H0STCNT0)"""
+        """실시간 체결 데이터 파싱 (H0STCNT0) - KIS 공식 문서 기준"""
         try:
             # 다중 데이터 건수 처리
             all_parts = data.split('^')
@@ -72,96 +72,137 @@ class KISWebSocketDataParser:
             start_idx = (total_records - 1) * field_count_per_record
             parts = all_parts[start_idx:start_idx + field_count_per_record]
             
-            # 🔥 StockManager 호환 필드명으로 매핑
-            current_price = self._safe_int(parts[2])
-            change_sign = parts[3]
-            buy_contract_count = self._safe_int(parts[16])
-            sell_contract_count = self._safe_int(parts[15])
-            contract_strength = self._safe_float(parts[18])
-            buy_ratio = self._safe_float(parts[22])
-            trading_halt = parts[35] == 'Y'
-            vi_standard_price = self._safe_int(parts[45]) if len(parts) > 45 else 0
+            # 🔥 KIS 공식 문서 순서에 맞는 필드 매핑 (wikidocs 참조)
+            # 순서: 유가증권단축종목코드|주식체결시간|주식현재가|전일대비부호|전일대비|전일대비율|...
+            stock_code = parts[0]  # 유가증권단축종목코드  
+            contract_time = parts[1]  # 주식체결시간
+            current_price = self._safe_int(parts[2])  # 주식현재가
+            change_sign = parts[3]  # 전일대비부호 (1:상한, 2:상승, 3:보합, 4:하한, 5:하락)
+            change_amount = self._safe_int(parts[4])  # 전일대비
+            change_rate = self._safe_float(parts[5])  # 전일대비율
+            weighted_avg_price = self._safe_float(parts[6])  # 가중평균주식가격
+            open_price = self._safe_int(parts[7])  # 주식시가
+            high_price = self._safe_int(parts[8])  # 주식최고가
+            low_price = self._safe_int(parts[9])  # 주식최저가
+            ask_price1 = self._safe_int(parts[10])  # 매도호가1
+            bid_price1 = self._safe_int(parts[11])  # 매수호가1
+            contract_volume = self._safe_int(parts[12])  # 체결거래량
+            acc_volume = self._safe_int(parts[13])  # 누적거래량
+            acc_trade_amount = self._safe_int(parts[14])  # 누적거래대금
+            sell_contract_count = self._safe_int(parts[15])  # 매도체결건수
+            buy_contract_count = self._safe_int(parts[16])  # 매수체결건수
+            net_buy_contract_count = self._safe_int(parts[17])  # 순매수체결건수
+            contract_strength = self._safe_float(parts[18])  # 체결강도
+            total_ask_qty = self._safe_int(parts[19])  # 총매도수량
+            total_bid_qty = self._safe_int(parts[20])  # 총매수수량
+            contract_type = parts[21]  # 체결구분 (1:매수, 3:장전, 5:매도)
+            buy_ratio = self._safe_float(parts[22])  # 매수비율
+            prev_volume_ratio = self._safe_float(parts[23])  # 전일거래량대비등락율
             
-            # 🆕 시장압력 계산 (체결구분 기반)
-            contract_type = parts[21]  # 1:매수(+), 3:장전, 5:매도(-)
-            if contract_type == '1':
+            # 🆕 시간 관련 정보들
+            open_time = parts[24]  # 시가시간
+            open_vs_current_sign = parts[25]  # 시가대비구분
+            open_vs_current = self._safe_int(parts[26])  # 시가대비
+            high_time = parts[27]  # 최고가시간
+            high_vs_current_sign = parts[28]  # 고가대비구분  
+            high_vs_current = self._safe_int(parts[29])  # 고가대비
+            low_time = parts[30]  # 최저가시간
+            low_vs_current_sign = parts[31]  # 저가대비구분
+            low_vs_current = self._safe_int(parts[32])  # 저가대비
+            business_date = parts[33]  # 영업일자
+            market_operation_code = parts[34]  # 신장운영구분코드
+            trading_halt = parts[35] == 'Y'  # 거래정지여부 (Y/N)
+            ask_qty1 = self._safe_int(parts[36])  # 매도호가잔량
+            bid_qty1 = self._safe_int(parts[37])  # 매수호가잔량
+            total_ask_qty_alt = self._safe_int(parts[38])  # 총매도호가잔량
+            total_bid_qty_alt = self._safe_int(parts[39])  # 총매수호가잔량
+            volume_turnover_rate = self._safe_float(parts[40])  # 거래량회전율
+            prev_same_time_volume = self._safe_int(parts[41])  # 전일동시간누적거래량
+            prev_same_time_volume_rate = self._safe_float(parts[42])  # 전일동시간누적거래량비율
+            hour_cls_code = parts[43]  # 시간구분코드 (0:장중, 기타:장외)
+            market_closing_code = parts[44] if len(parts) > 44 else ''  # 임의종료구분코드
+            vi_standard_price = self._safe_int(parts[45]) if len(parts) > 45 else 0  # 정적VI발동기준가
+            
+            # 🆕 시장압력 계산 (체결구분 + 매수비율 기반)
+            if contract_type == '1':  # 매수 체결
                 market_pressure = 'BUY'
-            elif contract_type == '5':
+            elif contract_type == '5':  # 매도 체결
                 market_pressure = 'SELL'
-            else:
+            else:  # 장전 또는 기타
                 market_pressure = 'NEUTRAL'
             
-            # 🆕 추가 시장압력 보정 (매수비율 기반)
+            # 🆕 매수비율 기반 압력 보정
             if buy_ratio > 60.0:
                 market_pressure = 'BUY'
             elif buy_ratio < 40.0:
                 market_pressure = 'SELL'
             
             parsed_data = {
-                # 🔥 StockManager 호환 필드명 사용
-                'stock_code': parts[0],
+                # 🔥 StockManager 호환 필드명 사용 (정확한 순서)
+                'stock_code': stock_code,
                 'current_price': current_price,
-                'acc_volume': self._safe_int(parts[13]),  # 누적 거래량
-                'contract_volume': self._safe_int(parts[12]),  # 체결 거래량
+                'acc_volume': acc_volume,  # 누적 거래량
+                'contract_volume': contract_volume,  # 체결 거래량
                 
-                # 기본 가격 정보
-                'open_price': self._safe_int(parts[7]),
-                'high_price': self._safe_int(parts[8]),
-                'low_price': self._safe_int(parts[9]),
+                # 기본 가격 정보 (정확한 순서)
+                'open_price': open_price,
+                'high_price': high_price,
+                'low_price': low_price,
                 
-                # 🆕 KIS 공식 문서 기반 고급 지표들 (StockManager 호환)
+                # 🆕 KIS 공식 문서 기반 고급 지표들
                 'contract_strength': contract_strength,
                 'buy_ratio': buy_ratio,
                 'market_pressure': market_pressure,
                 'vi_standard_price': vi_standard_price,
                 'trading_halt': trading_halt,
                 
-                # 전일 대비 정보
+                # 전일 대비 정보 (정확한 순서)
                 'change_sign': change_sign,
-                'change_amount': self._safe_int(parts[4]),
-                'change_rate': self._safe_float(parts[5]),
+                'change_amount': change_amount,
+                'change_rate': change_rate,
                 
-                # 체결 정보
-                'weighted_avg_price': self._safe_int(parts[6]),
+                # 체결 정보 (정확한 순서)
+                'weighted_avg_price': weighted_avg_price,
                 'sell_contract_count': sell_contract_count,
                 'buy_contract_count': buy_contract_count,
-                'net_buy_contract_count': self._safe_int(parts[17]),
+                'net_buy_contract_count': net_buy_contract_count,
                 
-                # 호가 정보
-                'ask_price1': self._safe_int(parts[10]),
-                'bid_price1': self._safe_int(parts[11]),
+                # 호가 정보 (정확한 순서)
+                'ask_price1': ask_price1,
+                'bid_price1': bid_price1,
+                'ask_qty1': ask_qty1,
+                'bid_qty1': bid_qty1,
                 
-                # 호가 잔량 정보
-                'total_ask_qty': self._safe_int(parts[38]),
-                'total_bid_qty': self._safe_int(parts[39]),
+                # 호가 잔량 정보 (정확한 순서) 
+                'total_ask_qty': total_ask_qty_alt,  # 총매도호가잔량 사용
+                'total_bid_qty': total_bid_qty_alt,  # 총매수호가잔량 사용
                 
-                # 거래량 관련
-                'volume_turnover_rate': self._safe_float(parts[40]),
-                'prev_same_time_volume': self._safe_int(parts[41]),
-                'prev_same_time_volume_rate': self._safe_float(parts[42]),
+                # 거래량 관련 (정확한 순서)
+                'volume_turnover_rate': volume_turnover_rate,
+                'prev_same_time_volume': prev_same_time_volume,
+                'prev_same_time_volume_rate': prev_same_time_volume_rate,
+                'prev_volume_ratio': prev_volume_ratio,
                 
-                # 시간 구분 정보
-                'hour_cls_code': parts[43],
-                'market_operation_code': parts[34],
+                # 시간 구분 정보 (정확한 순서)
+                'hour_cls_code': hour_cls_code,
+                'market_operation_code': market_operation_code,
+                'market_closing_code': market_closing_code,
                 
                 # 기존 필드들 (하위 호환성)
-                'contract_time': parts[1],
-                'acc_trade_amount': self._safe_int(parts[14]),
-                'business_date': parts[33],
-                'ask_qty1': self._safe_int(parts[36]),
-                'bid_qty1': self._safe_int(parts[37]),
-                'market_closing_code': parts[44],
+                'contract_time': contract_time,
+                'acc_trade_amount': acc_trade_amount,
+                'business_date': business_date,
                 
-                # 시가/고가/저가 대비 정보
-                'open_time': parts[24],
-                'open_vs_current_sign': parts[25],
-                'open_vs_current': self._safe_int(parts[26]),
-                'high_time': parts[27],
-                'high_vs_current_sign': parts[28],
-                'high_vs_current': self._safe_int(parts[29]),
-                'low_time': parts[30],
-                'low_vs_current_sign': parts[31],
-                'low_vs_current': self._safe_int(parts[32]),
+                # 시가/고가/저가 대비 정보 (정확한 순서)
+                'open_time': open_time,
+                'open_vs_current_sign': open_vs_current_sign,
+                'open_vs_current': open_vs_current,
+                'high_time': high_time,
+                'high_vs_current_sign': high_vs_current_sign,
+                'high_vs_current': high_vs_current,
+                'low_time': low_time,
+                'low_vs_current_sign': low_vs_current_sign,
+                'low_vs_current': low_vs_current,
                 
                 # 메타 정보
                 'timestamp': now_kst(),
@@ -170,10 +211,10 @@ class KISWebSocketDataParser:
                 'total_data_count': total_records,
                 
                 # 🆕 거래 참고 지표 (계산된 값들)
-                'is_market_time': parts[43] == '0',
+                'is_market_time': hour_cls_code == '0',
                 'is_trading_halt': trading_halt,
                 'price_momentum': 'UP' if change_sign in ['1', '2'] else 'DOWN' if change_sign in ['4', '5'] else 'FLAT',
-                'volume_activity': 'HIGH' if self._safe_float(parts[23]) > 150.0 else 'LOW' if self._safe_float(parts[23]) < 50.0 else 'NORMAL',
+                'volume_activity': 'HIGH' if prev_volume_ratio > 150.0 else 'LOW' if prev_volume_ratio < 50.0 else 'NORMAL',
                 'contract_imbalance': (buy_contract_count - sell_contract_count) / max(buy_contract_count + sell_contract_count, 1),
                 'strength_level': 'STRONG' if contract_strength > 120 else 'WEAK' if contract_strength < 80 else 'NORMAL'
             }
