@@ -1381,6 +1381,10 @@ class StockManager:
         # 체결 통보 콜백 등록
         websocket_manager.register_callback('H0STCNI0', self.handle_execution_notice)
         
+        # 🆕 RealTimeMonitor에서 웹소켓 상태를 조회할 수 있도록 참조 저장
+        # RealTimeMonitor._get_websocket_status_summary()는 self.stock_manager.websocket_manager를 참조하므로
+        # 여기서 속성을 생성해두어야 "웹소켓: 미사용" 오표시를 방지할 수 있습니다.
+        self.websocket_manager = websocket_manager
         
         logger.info("✅ StockManager 웹소켓 콜백 등록 완료")
     

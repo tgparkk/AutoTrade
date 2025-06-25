@@ -210,9 +210,17 @@ class KISWebSocketManager:
                             else:
                                 logger.warning("⚠️ PINGPONG 응답 전송 실패")
                     else:
-                        # message가 None이면 연결이 끊어진 것
-                        logger.warning("⚠️ 웹소켓 메시지 수신 실패 - 연결 상태 확인")
-                        break
+                        # message가 None이면 연결이 끊어진 것 (ConnectionClosed 등)
+                        logger.warning("⚠️ 웹소켓 메시지 수신 실패 - 연결 해제 감지, 재연결 시도")
+
+                        # 재연결 시도
+                        if not await self._handle_reconnect():
+                            logger.error("❌ 재연결 실패 - 루프 종료")
+                            break
+                        else:
+                            # 재연결에 성공했으면 루프 계속
+                            logger.info("✅ 재연결 성공 - 메시지 루프 계속")
+                            continue
 
                 except Exception as e:
                     logger.error(f"❌ 메시지 처리 오류: {e}")
