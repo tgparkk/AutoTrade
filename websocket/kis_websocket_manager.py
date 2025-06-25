@@ -73,6 +73,23 @@ class KISWebSocketManager:
         return set(self.subscription_manager.get_subscribed_stocks())
 
     # ==========================================
+    # 웹소켓 설정 상수들 (하드코딩 제거)
+    # ==========================================
+    
+    # 하트비트 설정
+    PINGPONG_TIMEOUT = 120          # PINGPONG 타임아웃 (초)
+    MESSAGE_TIMEOUT = 180           # 전체 메시지 타임아웃 (초)
+    RECEIVE_TIMEOUT = 10            # 메시지 수신 타임아웃 (초)
+    
+    # 오류 처리 설정
+    MAX_CONSECUTIVE_ERRORS = 5      # 최대 연속 오류 수
+    ERROR_RETRY_DELAY = 1           # 오류 후 재시도 대기 시간 (초)
+    
+    # 재연결 설정
+    RECONNECT_DELAY = 2             # 재연결 전 대기 시간 (초)
+    MAX_RECONNECT_ATTEMPTS = 3      # 최대 재연결 시도 횟수
+
+    # ==========================================
     # 연결 관리 (통합된 메서드들)
     # ==========================================
 
@@ -89,6 +106,7 @@ class KISWebSocketManager:
             name="WebSocketThread",
             daemon=True
         )
+        self.stats['connection_count'] += 1
         self._websocket_thread.start()
         logger.info("✅ 웹소켓 스레드 시작 완료")
 
@@ -106,7 +124,6 @@ class KISWebSocketManager:
         for i in range(15):
             if self.is_connected and self.connection.check_actual_connection_status():
                 logger.info(f"✅ 웹소켓 연결 성공 ({i+1}초 대기)")
-                self.stats['connection_count'] += 1
                 return True
             time.sleep(1)
 
@@ -163,118 +180,50 @@ class KISWebSocketManager:
             logger.debug(f"이벤트 루프 정리 오류: {e}")
 
     async def _websocket_main_loop(self):
-        """웹소켓 메인 루프"""
+        """웹소켓 메인 루프 (KIS 공식 방식에 가까운 단순화된 버전)"""
         try:
-            # 초기 연결
-            if not await self.connection.connect():
-                logger.error("초기 웹소켓 연결 실패")
+            # 초기 연결 및 설정
+            if not await self._initialize_websocket_connection():
                 return
 
-            self.connection.is_running = True
-            logger.info("✅ 웹소켓 메인 루프 시작")
+            logger.info("✅ 웹소켓 메인 루프 시작 (단순화된 버전)")
 
-            # 계좌 체결통보 구독
-            await self._subscribe_account_notices()
-
-            # 메시지 처리 루프
-            consecutive_errors = 0
-            max_errors = 5
-            
-            # 🔥 PINGPONG 기반 하트비트 관리
-            last_pingpong_time = time.time()
-            pingpong_timeout = 180  # 3분간 PINGPONG 없으면 연결 의심 (KIS는 보통 30초~1분 간격)
-            
-            # 기존 시간 기반 백업 하트비트 (PINGPONG 실패시 대비)
-            last_any_message_time = time.time()
-            message_timeout = 300  # 5분간 아무 메시지 없으면 연결 의심
-
+            # 메인 메시지 처리 루프 (KIS 공식 방식과 유사)
             while self.connection.is_running and not self._shutdown_event.is_set():
                 try:
-                    current_time = time.time()
-                    
-                    # 🔥 1차 체크: PINGPONG 기반 하트비트 (더 정확함)
-                    if current_time - last_pingpong_time > pingpong_timeout:
-                        logger.warning(f"⚠️ {pingpong_timeout//60}분간 PINGPONG 없음 - 연결 상태 의심")
-                        
-                        # 실제 연결 상태 확인
-                        if not self.connection.check_actual_connection_status():
-                            logger.warning("❌ PINGPONG 타임아웃 + 연결 상태 이상 - 재연결 시도")
-                            if not await self._handle_reconnect():
-                                logger.error("❌ PINGPONG 타임아웃 후 재연결 실패 - 루프 종료")
-                                break
-                            # 재연결 성공시 하트비트 시간 리셋
-                            last_pingpong_time = time.time()
-                            last_any_message_time = time.time()
-                            continue
-                        else:
-                            # 연결은 정상인데 PINGPONG만 없는 경우 (서버측 이슈 가능성)
-                            logger.info("🔍 연결은 정상이나 PINGPONG 지연됨 - 계속 대기")
-                            last_pingpong_time = current_time  # 타임아웃 리셋
-                    
-                    # 🔥 2차 체크: 백업 하트비트 (모든 메시지 기준)
-                    elif current_time - last_any_message_time > message_timeout:
-                        logger.warning(f"⚠️ {message_timeout//60}분간 모든 메시지 없음 - 연결 상태 체크")
-                        if not self.connection.check_actual_connection_status():
-                            logger.warning("❌ 메시지 타임아웃 + 연결 상태 이상 - 재연결 시도")
-                            if not await self._handle_reconnect():
-                                logger.error("❌ 메시지 타임아웃 후 재연결 실패 - 루프 종료")
-                                break
-                            last_pingpong_time = time.time()
-                            last_any_message_time = time.time()
-                            continue
-                        else:
-                            last_any_message_time = current_time  # 연결 정상이면 시간 업데이트
-
-                    # 기본 연결 상태 확인
-                    if not self.connection.check_actual_connection_status():
-                        logger.warning("❌ 웹소켓 연결 상태 이상")
-                        if not await self._handle_reconnect():
-                            logger.error("❌ 연결 상태 체크 후 재연결 실패 - 루프 종료")
-                            break
-
-                    # 메시지 수신 및 처리
-                    message = await asyncio.wait_for(
-                        self.connection.receive_message(), timeout=30
-                    )
+                    # 메시지 수신 (KIS 공식 방식)
+                    message = await self.connection.receive_message()
 
                     if message:
                         self.stats['total_messages'] += 1
-                        consecutive_errors = 0
-                        last_any_message_time = time.time()  # 모든 메시지에 대해 시간 업데이트
-
+                        
                         # 메시지 처리
                         result = await self.message_handler.process_message(message)
                         
-                        # 🔥 PINGPONG 처리 및 하트비트 업데이트
+                        # PINGPONG 처리 (KIS 공식 방식)
                         if result and result[0] == 'PINGPONG':
-                            await self.connection.send_pong(result[1])
-                            self.stats['ping_pong_count'] += 1
-                            self.stats['last_ping_pong_time'] = time.time()  # stats에도 기록
-                            last_pingpong_time = time.time()  # PINGPONG 수신 시간 업데이트
-                            logger.debug(f"🏓 PINGPONG 하트비트 수신 (카운트: {self.stats['ping_pong_count']})")
-
-                except asyncio.TimeoutError:
-                    # 타임아웃은 정상적인 상황 (30초간 메시지가 없을 때)
-                    logger.debug("📡 웹소켓 메시지 수신 타임아웃 (정상)")
-                    continue
-                except asyncio.CancelledError:
-                    logger.info("🛑 웹소켓 루프 취소 신호 수신")
-                    break
-                except Exception as e:
-                    consecutive_errors += 1
-                    logger.error(f"❌ 메시지 처리 오류 (연속 {consecutive_errors}회): {e}")
-
-                    if consecutive_errors >= max_errors:
-                        logger.error(f"❌ 연속 오류 한계 도달 ({consecutive_errors}/{max_errors}) - 재연결 시도")
-                        if not await self._handle_reconnect():
-                            logger.error("❌ 연속 오류 후 재연결 실패 - 루프 종료")
-                            break
-                        consecutive_errors = 0
-                        # 재연결 성공시 하트비트 시간 리셋
-                        last_pingpong_time = time.time()
-                        last_any_message_time = time.time()
+                            pong_success = await self.connection.send_pong(result[1])
+                            if pong_success:
+                                self.stats['ping_pong_count'] += 1
+                                self.stats['last_ping_pong_time'] = time.time()
+                                logger.debug(f"🏓 PINGPONG 응답 완료 (카운트: {self.stats['ping_pong_count']})")
+                            else:
+                                logger.warning("⚠️ PINGPONG 응답 전송 실패")
                     else:
-                        logger.info(f"⏳ {consecutive_errors}회 오류 후 1초 대기")
+                        # message가 None이면 연결이 끊어진 것
+                        logger.warning("⚠️ 웹소켓 메시지 수신 실패 - 연결 상태 확인")
+                        break
+
+                except Exception as e:
+                    logger.error(f"❌ 메시지 처리 오류: {e}")
+                    # 연결 오류인 경우 재연결 시도
+                    if "ConnectionClosed" in str(e) or "websocket" in str(e).lower():
+                        logger.warning("🔄 웹소켓 연결 오류 감지 - 재연결 시도")
+                        if not await self._handle_reconnect():
+                            logger.error("❌ 재연결 실패 - 루프 종료")
+                            break
+                    else:
+                        # 기타 오류는 1초 대기 후 계속
                         await asyncio.sleep(1)
 
         except Exception as e:
@@ -285,46 +234,20 @@ class KISWebSocketManager:
             await self._cleanup_connection()
             logger.info("🛑 웹소켓 메인 루프 종료")
 
-    async def _handle_reconnect(self) -> bool:
-        """재연결 처리"""
-        logger.info("🔄 웹소켓 재연결 시도...")
-        self.stats['reconnect_count'] += 1
+    async def _initialize_websocket_connection(self) -> bool:
+        """웹소켓 연결 초기화"""
+        if not await self.connection.connect():
+            logger.error("초기 웹소켓 연결 실패")
+            return False
 
-        try:
-            # 기존 연결 정리
-            await self.connection.disconnect()
-            await asyncio.sleep(2)
-
-            # 🔥 최대 3회 재연결 시도
-            max_retry = 3
-            for attempt in range(1, max_retry + 1):
-                logger.info(f"🔄 재연결 시도 {attempt}/{max_retry}")
-                
-                if await self.connection.connect():
-                    logger.info(f"✅ 웹소켓 재연결 성공 ({attempt}회 시도)")
-                    
-                    # 계좌 체결통보 재구독
-                    if await self._subscribe_account_notices():
-                        logger.info("✅ 계좌 체결통보 재구독 완료")
-                        return True
-                    else:
-                        logger.warning("⚠️ 계좌 체결통보 재구독 실패 - 다시 시도")
-                        await self.connection.disconnect()
-                        if attempt < max_retry:
-                            await asyncio.sleep(3)
-                        continue
-                else:
-                    logger.warning(f"❌ 재연결 실패 ({attempt}/{max_retry})")
-                    if attempt < max_retry:
-                        await asyncio.sleep(5)  # 재시도 전 더 긴 대기
-                    continue
-
-            logger.error(f"❌ 웹소켓 재연결 최종 실패 ({max_retry}회 시도)")
+        self.connection.is_running = True
+        
+        # 계좌 체결통보 구독
+        if not await self._subscribe_account_notices():
+            logger.error("계좌 체결통보 구독 실패")
             return False
             
-        except Exception as e:
-            logger.error(f"❌ 웹소켓 재연결 처리 오류: {e}")
-            return False
+        return True
 
     async def _subscribe_account_notices(self):
         """계좌 체결통보 구독"""
@@ -651,3 +574,43 @@ class KISWebSocketManager:
             self.safe_cleanup()
         except Exception:
             pass
+
+    async def _handle_reconnect(self) -> bool:
+        """재연결 처리"""
+        logger.info("🔄 웹소켓 재연결 시도...")
+        self.stats['reconnect_count'] += 1
+
+        try:
+            # 기존 연결 정리
+            await self.connection.disconnect()
+            await asyncio.sleep(self.RECONNECT_DELAY)
+
+            # 최대 3회 재연결 시도
+            for attempt in range(1, self.MAX_RECONNECT_ATTEMPTS + 1):
+                logger.info(f"🔄 재연결 시도 {attempt}/{self.MAX_RECONNECT_ATTEMPTS}")
+                
+                if await self.connection.connect():
+                    logger.info(f"✅ 웹소켓 재연결 성공 ({attempt}회 시도)")
+                    
+                    # 계좌 체결통보 재구독
+                    if await self._subscribe_account_notices():
+                        logger.info("✅ 계좌 체결통보 재구독 완료")
+                        return True
+                    else:
+                        logger.warning("⚠️ 계좌 체결통보 재구독 실패 - 다시 시도")
+                        await self.connection.disconnect()
+                        if attempt < self.MAX_RECONNECT_ATTEMPTS:
+                            await asyncio.sleep(3)
+                        continue
+                else:
+                    logger.warning(f"❌ 재연결 실패 ({attempt}/{self.MAX_RECONNECT_ATTEMPTS})")
+                    if attempt < self.MAX_RECONNECT_ATTEMPTS:
+                        await asyncio.sleep(5)  # 재시도 전 더 긴 대기
+                    continue
+
+            logger.error(f"❌ 웹소켓 재연결 최종 실패 ({self.MAX_RECONNECT_ATTEMPTS}회 시도)")
+            return False
+            
+        except Exception as e:
+            logger.error(f"❌ 웹소켓 재연결 처리 오류: {e}")
+            return False

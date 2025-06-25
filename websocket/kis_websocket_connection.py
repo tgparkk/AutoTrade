@@ -98,17 +98,17 @@ class KISWebSocketConnection:
                 logger.error("❌ 승인키 발급 실패로 웹소켓 연결 불가")
                 return False
 
-            # 웹소켓 연결
+            # 웹소켓 연결 (KIS 공식 방식에 맞게 수정)
             self.websocket = await websockets.connect(
                 self.ws_url,
-                ping_interval=None,
-                ping_timeout=None,
+                ping_interval=None,     # KIS 공식: ping_interval=None
+                ping_timeout=None,      # KIS 공식: ping_timeout 미설정
                 close_timeout=10
             )
 
             self.is_connected = True
             self.stats['successful_connections'] += 1
-            logger.info("✅ 웹소켓 연결 성공")
+            logger.info("✅ 웹소켓 연결 성공 (ping_interval=None, ping_timeout=None)")
             return True
 
         except Exception as e:
@@ -153,18 +153,26 @@ class KISWebSocketConnection:
             return False
 
     async def send_pong(self, ping_data: str) -> bool:
-        """KIS PINGPONG 응답 전송"""
+        """KIS PINGPONG 응답 전송 (KIS 공식 방식)"""
         try:
             if not self.websocket:
                 logger.warning("웹소켓이 연결되지 않음")
                 return False
 
-            # KIS PINGPONG은 JSON 메시지이므로 동일한 메시지를 그대로 전송
-            await self.websocket.send(ping_data)
+            # 연결 상태 재확인
+            if not self.check_actual_connection_status():
+                logger.warning("웹소켓 연결 상태 이상으로 PINGPONG 응답 불가")
+                return False
+
+            # 🔥 KIS 공식 방식: websocket.pong() 사용
+            await asyncio.wait_for(self.websocket.pong(ping_data), timeout=5)
             self.stats['last_pong_time'] = now_kst().timestamp()
-            logger.debug(f"🏓 PINGPONG 응답 전송: {ping_data[:80]}...")
+            logger.debug(f"🏓 PINGPONG 응답 전송 성공 (KIS 공식 방식): {ping_data[:50]}...")
             return True
 
+        except asyncio.TimeoutError:
+            logger.error("❌ PINGPONG 응답 전송 타임아웃 (5초)")
+            return False
         except Exception as e:
             logger.error(f"❌ PINGPONG 응답 전송 실패: {e}")
             return False

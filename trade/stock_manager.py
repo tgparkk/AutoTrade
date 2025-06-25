@@ -1326,4 +1326,7 @@ class StockManager:
         # 체결 통보 콜백 등록
         websocket_manager.register_callback('H0STCNI0', self.handle_execution_notice)
         
-        logger.info("✅ StockManager 웹소켓 콜백 등록 완료") 
+        
+        logger.info("✅ StockManager 웹소켓 콜백 등록 완료")
+    
+ 

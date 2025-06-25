@@ -139,10 +139,14 @@ class KISWebSocketMessageHandler:
             tr_id = json_data.get('header', {}).get('tr_id', '')
 
             if tr_id == "PINGPONG":
-                # PINGPONG 처리
-                logger.debug(f"### RECV [PINGPONG]")
+                # 🔥 KIS 공식 PINGPONG 처리 방식
+                logger.debug(f"🏓 RECV [PINGPONG]: {data[:50]}...")
                 self.stats['ping_pong_count'] = self.stats.get('ping_pong_count', 0) + 1
                 self.stats['last_ping_pong_time'] = now_kst()
+                
+
+                
+                # KIS 공식: 받은 데이터를 그대로 websocket.pong()에 전달
                 return 'PINGPONG', data
             else:
                 body = json_data.get('body', {})
@@ -162,6 +166,7 @@ class KISWebSocketMessageHandler:
 
         except Exception as e:
             logger.error(f"시스템 메시지 처리 오류: {e}")
+            self.stats['errors'] += 1
 
     async def process_message(self, message: str):
         """메시지 분류 및 처리"""
