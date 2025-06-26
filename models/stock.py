@@ -19,6 +19,11 @@ class StockStatus(Enum):
     SELL_READY = "매도준비"
     SELL_ORDERED = "매도주문"
     SOLD = "매도완료"
+    
+    # 🆕 부분 체결 및 취소 상태 추가
+    PARTIAL_BOUGHT = "부분매수완료"
+    PARTIAL_SOLD = "부분매도완료"
+    CANCELED = "취소"
 
 
 @dataclass(frozen=True)

@@ -167,6 +167,10 @@ class StockManager:
                     'realized_pnl': None,
                     'realized_pnl_rate': None,
                     'position_size_ratio': 0.0,
+                    'ordered_qty': None,
+                    'filled_qty': 0,
+                    'remaining_qty': None,
+                    'avg_exec_price': None,
                     'detected_time': now_kst(),
                     'updated_at': now_kst()
                 }
@@ -333,6 +337,10 @@ class StockManager:
                     'realized_pnl': None,
                     'realized_pnl_rate': None,
                     'position_size_ratio': 0.0,
+                    'ordered_qty': None,
+                    'filled_qty': 0,
+                    'remaining_qty': None,
+                    'avg_exec_price': None,
                     'detected_time': now_kst(),
                     'updated_at': now_kst(),
                     'is_intraday_added': True  # 🆕 장중 추가 표시
@@ -1239,30 +1247,64 @@ class StockManager:
         """매수 체결 처리"""
         try:
             current_status = self.trading_status.get(stock_code)
-            
-            if current_status != StockStatus.BUY_ORDERED:
-                logger.warning(f"매수 체결이지만 주문 상태가 아님: {stock_code} 상태:{current_status.value if current_status else 'None'}")
-                # 그래도 체결 처리 진행 (상태 불일치 복구)
-            
-            # 종목 상태를 BOUGHT로 변경하고 체결 정보 업데이트
+
+            if current_status not in [StockStatus.BUY_ORDERED, StockStatus.PARTIAL_BOUGHT]:
+                logger.warning(
+                    f"매수 체결이지만 주문 상태가 예상과 다름: {stock_code} 상태:{current_status.value if current_status else 'None'}")
+
+            # ------------------------------
+            # 누적 체결 정보 업데이트
+            # ------------------------------
+            with self._status_lock:
+                info = self.trade_info.get(stock_code, {})
+
+                # 최초 주문 수량이 기록되지 않았다면 buy_quantity 필드 또는 exec_qty 로 대체
+                if info.get('ordered_qty') is None:
+                    ordered_qty = info.get('buy_quantity') or exec_qty
+                    info['ordered_qty'] = ordered_qty
+                else:
+                    ordered_qty = info['ordered_qty']
+
+                filled_prev = info.get('filled_qty', 0) or 0
+                filled_new = filled_prev + exec_qty
+                remaining_qty = max(ordered_qty - filled_new, 0)
+
+                # 가중 평균 단가 계산
+                if filled_prev == 0:
+                    avg_price = exec_price
+                else:
+                    prev_avg = info.get('avg_exec_price', exec_price)
+                    avg_price = (prev_avg * filled_prev + exec_price * exec_qty) / filled_new
+
+                # trade_info 반영
+                info['filled_qty'] = filled_new
+                info['remaining_qty'] = remaining_qty
+                info['avg_exec_price'] = avg_price
+                info['buy_price'] = avg_price  # 최종 평단을 buy_price 로 사용
+                info['execution_time'] = now_kst()
+
+            # ------------------------------
+            # 상태 결정
+            # ------------------------------
+            new_status = StockStatus.BOUGHT if remaining_qty == 0 else StockStatus.PARTIAL_BOUGHT
+
             success = self.change_stock_status(
                 stock_code=stock_code,
-                new_status=StockStatus.BOUGHT,
-                reason="buy_executed",
-                buy_price=exec_price,
-                buy_quantity=exec_qty,
-                buy_amount=exec_price * exec_qty,
-                execution_time=now_kst()
+                new_status=new_status,
+                reason="buy_executed_partial" if remaining_qty else "buy_executed_full",
+                buy_price=avg_price,
+                buy_quantity=filled_new,
+                buy_amount=avg_price * filled_new
             )
-            
+
             if success:
-                # 🔥 실제 체결 시점에 거래 기록 저장 (데이터베이스 클래스로 위임)
+                # DB 저장 (부분 체결도 저장하여 누적 기록)
                 try:
                     database = self._get_database()
                     metadata = self.stock_metadata.get(stock_code, {})
                     trade_info = self.trade_info.get(stock_code, {})
-                    
-                    db_id = database.save_buy_execution_to_db(
+
+                    database.save_buy_execution_to_db(
                         stock_code=stock_code,
                         exec_price=exec_price,
                         exec_qty=exec_qty,
@@ -1270,21 +1312,17 @@ class StockManager:
                         trade_info=trade_info,
                         get_current_market_phase_func=self._get_current_market_phase
                     )
-                    
-                    if db_id <= 0:
-                        logger.warning(f"⚠️ 매수 체결 DB 저장 실패: {stock_code}")
-                        
                 except Exception as db_e:
                     logger.error(f"❌ 매수 체결 DB 저장 오류 {stock_code}: {db_e}")
-                
-                # RealTimeMonitor 통계 업데이트 (있는 경우)
-                if hasattr(self, '_realtime_monitor_ref'):
+
+                if hasattr(self, '_realtime_monitor_ref') and remaining_qty == 0:
                     self._realtime_monitor_ref.buy_orders_executed += 1
-                
-                logger.info(f"✅ 매수 체결 완료: {stock_code} {exec_qty}주 @{exec_price:,}원")
+
+                logger.info(
+                    f"✅ 매수 체결 처리: {stock_code} {exec_qty}주 @{exec_price:,}원 (누적 {filled_new}/{ordered_qty}주, 잔량 {remaining_qty})")
             else:
                 logger.error(f"❌ 매수 체결 상태 업데이트 실패: {stock_code}")
-                
+
         except Exception as e:
             logger.error(f"매수 체결 처리 오류 {stock_code}: {e}")
     
@@ -1292,44 +1330,69 @@ class StockManager:
         """매도 체결 처리"""
         try:
             current_status = self.trading_status.get(stock_code)
-            
-            if current_status != StockStatus.SELL_ORDERED:
-                logger.warning(f"매도 체결이지만 주문 상태가 아님: {stock_code} 상태:{current_status.value if current_status else 'None'}")
-                # 그래도 체결 처리 진행 (상태 불일치 복구)
-            
-            # 현재 매수 정보 조회 (손익 계산용)
-            trade_info = self.trade_info.get(stock_code, {})
-            buy_price = trade_info.get('buy_price', 0)
-            buy_quantity = trade_info.get('buy_quantity', 0)
-            
-            # 손익 계산
+
+            if current_status not in [StockStatus.SELL_ORDERED, StockStatus.PARTIAL_SOLD]:
+                logger.warning(
+                    f"매도 체결이지만 주문 상태가 예상과 다름: {stock_code} 상태:{current_status.value if current_status else 'None'}")
+
+            with self._status_lock:
+                info = self.trade_info.get(stock_code, {})
+
+                # 최초 매도 주문 수량 기록
+                if info.get('ordered_qty') is None:
+                    ordered_qty = info.get('sell_quantity') or exec_qty
+                    info['ordered_qty'] = ordered_qty
+                else:
+                    ordered_qty = info['ordered_qty']
+
+                filled_prev = info.get('filled_qty', 0) or 0
+                filled_new = filled_prev + exec_qty
+                remaining_qty = max(ordered_qty - filled_new, 0)
+
+                # 평균 체결가(매도)는 가중 평균 필요 X 하지만 기록 일관성 유지
+                if filled_prev == 0:
+                    avg_price = exec_price
+                else:
+                    prev_avg = info.get('avg_exec_price', exec_price)
+                    avg_price = (prev_avg * filled_prev + exec_price * exec_qty) / filled_new
+
+                info['filled_qty'] = filled_new
+                info['remaining_qty'] = remaining_qty
+                info['avg_exec_price'] = avg_price
+                info['sell_price'] = avg_price
+                info['sell_execution_time'] = now_kst()
+
+            # 손익 계산 — buy_price 는 평단, buy_quantity 는 총수량로 가정
+            buy_price = info.get('buy_price', 0)
+            buy_total_qty = info.get('buy_quantity', 0) or info.get('ordered_qty', 0)
+
             realized_pnl = 0
             realized_pnl_rate = 0
-            if buy_price > 0 and buy_quantity > 0:
-                realized_pnl = (exec_price - buy_price) * exec_qty
-                realized_pnl_rate = (exec_price - buy_price) / buy_price * 100
-            
-            # 종목 상태를 SOLD로 변경하고 체결 정보 업데이트
+            if buy_price > 0 and buy_total_qty > 0:
+                realized_pnl = (avg_price - buy_price) * filled_new
+                realized_pnl_rate = (avg_price - buy_price) / buy_price * 100
+
+            new_status = StockStatus.SOLD if remaining_qty == 0 else StockStatus.PARTIAL_SOLD
+
             now_ts = now_kst()
             success = self.change_stock_status(
                 stock_code=stock_code,
-                new_status=StockStatus.SOLD,
-                reason="sell_executed",
-                sell_price=exec_price,
+                new_status=new_status,
+                reason="sell_executed_partial" if remaining_qty else "sell_executed_full",
+                sell_price=avg_price,
                 sell_execution_time=now_ts,
-                sell_order_time=now_ts,  # 주문 시간이 없을 경우 실행 시각으로 대체
+                sell_order_time=now_ts,
                 realized_pnl=realized_pnl,
                 realized_pnl_rate=realized_pnl_rate
             )
-            
+
             if success:
-                # 🔥 실제 체결 시점에 거래 기록 저장 (데이터베이스 클래스로 위임)
                 try:
                     database = self._get_database()
                     metadata = self.stock_metadata.get(stock_code, {})
                     trade_info = self.trade_info.get(stock_code, {})
-                    
-                    db_id = database.save_sell_execution_to_db(
+
+                    database.save_sell_execution_to_db(
                         stock_code=stock_code,
                         exec_price=exec_price,
                         exec_qty=exec_qty,
@@ -1339,22 +1402,16 @@ class StockManager:
                         trade_info=trade_info,
                         get_current_market_phase_func=self._get_current_market_phase
                     )
-                    
-                    if db_id <= 0:
-                        logger.warning(f"⚠️ 매도 체결 DB 저장 실패: {stock_code}")
-                        
                 except Exception as db_e:
                     logger.error(f"❌ 매도 체결 DB 저장 오류 {stock_code}: {db_e}")
-                
-                # RealTimeMonitor 통계 업데이트 (있는 경우)
-                if hasattr(self, '_realtime_monitor_ref'):
+
+                if hasattr(self, '_realtime_monitor_ref') and remaining_qty == 0:
                     self._realtime_monitor_ref.sell_orders_executed += 1
-                
-                logger.info(f"✅ 매도 체결 완료: {stock_code} {exec_qty}주 @{exec_price:,}원 "
-                           f"손익: {realized_pnl:+,.0f}원 ({realized_pnl_rate:+.2f}%)")
+
+                logger.info(
+                    f"✅ 매도 체결 처리: {stock_code} {exec_qty}주 @{exec_price:,}원 (누적 {filled_new}/{ordered_qty}주, 잔량 {remaining_qty})")
             else:
                 logger.error(f"❌ 매도 체결 상태 업데이트 실패: {stock_code}")
-                
         except Exception as e:
             logger.error(f"매도 체결 처리 오류 {stock_code}: {e}")
     
