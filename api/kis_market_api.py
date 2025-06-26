@@ -155,7 +155,6 @@ def get_inquire_time_itemconclusion(output_dv: str = "1", div_code: str = "J", i
 
     params = {
         "FID_COND_MRKT_DIV_CODE": div_code,     # J:주식/ETF/ETN, W:ELW
-        "FID_INPUT_ISCD": itm_no,               # 종목번호(6자리)
         "FID_INPUT_HOUR_1": inqr_hour           # 기준시간(HHMMSS)
     }
 
@@ -1045,4 +1044,46 @@ def get_existing_holdings() -> List[Dict]:
     except Exception as e:
         logger.error(f"기존 보유 종목 조회 오류: {e}")
         return []
+
+
+# ------------------------------------------------------------
+# 🆕 실시간/장전 등락률‧거래대금 랭킹 API
+# ------------------------------------------------------------
+
+def get_price_ranking(rank_type: str = "up", top_n: int = 100):
+    """가격 랭킹 조회
+
+    Args:
+        rank_type: up(상승률), down(하락률), trade_val(거래대금) 등 – KIS HTS 0103 화면 기준
+        top_n: 상위 N건 반환 (기본 100)
+
+    Returns:
+        pandas.DataFrame 또는 None
+    """
+    # TR: FHKST01030200 (국내주식 가격대비등락률 순위)
+    url = "/uapi/domestic-stock/v1/quotations/inquire-price-ranking"
+    tr_id = "FHKST01030200"
+
+    # 스크리닝 코드 매핑 (KIS 문서 기준). 기본값: 상승률
+    scr_div_code_map = {
+        "up": "01",       # 상승률
+        "down": "02",     # 하락률
+        "trade_val": "03" # 거래대금
+    }
+    scr_code = scr_div_code_map.get(rank_type.lower(), "01")
+
+    params = {
+        "FID_COND_MRKT_DIV_CODE": "J",      # 주식
+        "FID_COND_SCR_DIV_CODE": scr_code,   # 스크리닝 구분
+        "FID_INPUT_YN": "N",               # 추가 입력 여부
+        "FID_TRGT_EXLS_TIME": "0",          # 제외 시간대 (0: 없음)
+        "FID_PERIOD_DIV": "D",              # 일간
+        "FID_ORG_ADJ_PRC": "0",            # 수정주가 반영 여부
+        "FID_AVRG_VOL_VL": "0"              # 평균 거래량 필터 (0=사용안함)
+    }
+
+    df = _fetch(url, tr_id, params)
+    if df is not None and not df.empty:
+        return df.head(top_n)
+    return df
 

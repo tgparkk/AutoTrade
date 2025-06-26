@@ -24,6 +24,9 @@ except ImportError:
 
 logger = setup_logger(__name__)
 
+# 기술적 지표 유틸
+from utils.technical_indicators import compute_indicators
+import pandas as pd
 
 def _is_data_empty(data: Any) -> bool:
     """데이터가 비어있는지 안전하게 체크하는 함수"""
@@ -154,19 +157,32 @@ class MarketScanner:
         
         logger.info(f"KOSPI 전체 종목 수: {len(all_stocks)}")
         
-        # 2. 각 종목별 종합 점수 계산
-        scored_stocks = []
-        
-        # 전체 KOSPI 종목을 대상으로 스캔
-        # 성능을 위해 우선주나 특수주는 제외
-        scan_candidates = [
-            stock for stock in all_stocks 
+        # 2-1. 상승률 랭킹 상위 N 종목 풀 확보 (API 오류 시 전체로 대체)
+        try:
+            from api.kis_market_api import get_price_ranking
+            rank_df = get_price_ranking('up', self.rank_head_limit)
+            if rank_df is not None and not rank_df.empty:
+                rank_codes = set(rank_df['stck_shrn_iscd'].astype(str).str.zfill(6).tolist())
+            else:
+                rank_codes = set()
+        except Exception as e:
+            logger.debug(f"랭킹 API 실패: {e}")
+            rank_codes = set()
+
+        # 전체 KOSPI 종목 중 우선주·스팩 제외
+        base_candidates = [
+            stock for stock in all_stocks
             if stock['code'].isdigit() and len(stock['code']) == 6 and '우' not in stock['name']
         ]
 
-        #scan_candidates = scan_candidates[:100]
+        if rank_codes:
+            scan_candidates = [s for s in base_candidates if s['code'] in rank_codes]
+            logger.info(f"랭킹 상위 {len(rank_codes)}개 중 {len(scan_candidates)}개 코드 필터 적용")
+        else:
+            scan_candidates = base_candidates
         
-        logger.info(f"스캔 대상 종목 수: {len(scan_candidates)} (우선주 제외)")
+        # 2. 각 종목별 종합 점수 계산
+        scored_stocks = []
         
         for stock in scan_candidates:
             try:
@@ -228,35 +244,54 @@ class MarketScanner:
             # 최근 데이터부터 정렬 (API는 보통 최신부터 내림차순)
             recent_data = data_list[:20]  # 최근 20일
             
-            # 거래량 증가율 계산 (최근 5일 평균 vs 그 전 5일 평균)
+            # 거래량 분석 – 평균 및 증가율 계산
             recent_volumes = [float(day.get('acml_vol', 0)) for day in recent_data[:5]]
             previous_volumes = [float(day.get('acml_vol', 0)) for day in recent_data[5:10]]
-            
+
             recent_avg_vol = sum(recent_volumes) / len(recent_volumes) if recent_volumes else 1
             previous_avg_vol = sum(previous_volumes) / len(previous_volumes) if previous_volumes else 1
             volume_increase_rate = recent_avg_vol / previous_avg_vol if previous_avg_vol > 0 else 1
+
+            # 전체 20일 평균 거래량 및 거래대금(저유동 필터용)
+            all_volumes = [float(day.get('acml_vol', 0)) for day in recent_data]
+            avg_daily_volume_20d = sum(all_volumes) / len(all_volumes) if all_volumes else 0
+            avg_daily_trading_value = avg_daily_volume_20d * float(recent_data[0].get('stck_clpr', 0))  # 원단위
             
             # 가격 변동률 (전일 대비)
             today_close = float(recent_data[0].get('stck_clpr', 0))
             yesterday_close = float(recent_data[1].get('stck_clpr', 0)) if len(recent_data) > 1 else today_close
             price_change_rate = (today_close - yesterday_close) / yesterday_close if yesterday_close > 0 else 0
-            
-            # RSI 계산 (단순화된 버전)
-            closes = [float(day.get('stck_clpr', 0)) for day in recent_data[:14]]
-            rsi = self._calculate_rsi(closes)
-            
-            # 이동평균선 정배열 여부
+
+            # ---------------------------
+            # 🆕 기술적 지표 계산 (RSI, MACD 등)
+            # ---------------------------
+            try:
+                df_full = pd.DataFrame(recent_data[::-1])  # 오래된→신규 순으로 역전
+                indi = compute_indicators(df_full, close_col="stck_clpr", volume_col="acml_vol")
+                rsi = indi.get("rsi", 50)
+                macd_val = indi.get("macd", 0)
+                macd_signal = indi.get("macd_signal", 0)
+                macd_hist = indi.get("macd_hist", 0)
+                volume_spike = indi.get("volume_spike", 1)
+            except Exception:
+                rsi = 50
+                macd_val = macd_signal = macd_hist = 0
+                volume_spike = 1
+
+            # 이동평균선 정배열 여부 (기존 함수 재사용)
             ma_alignment = self._check_ma_alignment(recent_data)
-            
-            # MACD 신호 (단순화)
-            macd_signal = self._calculate_macd_signal(recent_data)
             
             return {
                 'volume_increase_rate': volume_increase_rate,
                 'yesterday_volume': int(recent_volumes[1]) if len(recent_volumes) > 1 else 0,
+                'avg_daily_volume': avg_daily_volume_20d,
+                'avg_daily_trading_value': avg_daily_trading_value,
                 'price_change_rate': price_change_rate,
                 'rsi': rsi,
                 'macd_signal': macd_signal,
+                'macd': macd_val,
+                'macd_hist': macd_hist,
+                'volume_spike_ratio': volume_spike,
                 'ma_alignment': ma_alignment,
                 'support_level': min([float(day.get('stck_lwpr', 0)) for day in recent_data[:10]]),
                 'resistance_level': max([float(day.get('stck_hgpr', 0)) for day in recent_data[:10]])
@@ -665,11 +700,15 @@ class MarketScanner:
             total_score = sum(pattern_scores.values())
             reliability = min(total_score / len(detected_patterns), 1.0) if detected_patterns else 0.0
             
+            # 패턴 점수는 18점을 상한으로 캡핑 (다수 패턴 중복 시 과대평가 방지)
+            pattern_score = min(total_score * 18, 18)
+            
             return {
                 'detected_patterns': detected_patterns,
                 'pattern_scores': pattern_scores,
                 'total_pattern_score': total_score,
-                'reliability': reliability
+                'reliability': reliability,
+                'pattern_score': pattern_score
             }
             
         except Exception as e:
@@ -755,6 +794,15 @@ class MarketScanner:
             logger.debug(f"📊 {stock_code} 기본 분석 실패로 종목 제외")
             return None
         
+        # ------------------------------
+        # 🆕 저유동성 필터: 20일 평균 거래대금이 설정값(intraday_min_trading_value)보다 작으면 제외
+        # ------------------------------
+        if fundamentals.get('avg_daily_trading_value', 0) < self.min_trading_value:
+            logger.debug(
+                f"📊 {stock_code} 평균 거래대금 {fundamentals.get('avg_daily_trading_value',0)/1_000_000:,.1f}M < "
+                f"min_trading_value({self.min_trading_value/1_000_000}M) – 제외")
+            return None
+        
         # 캔들패턴 분석 (같은 데이터 재사용)
         if _get_data_length(ohlcv_data) < 5:
             logger.debug(f"📊 {stock_code} 캔들패턴 분석용 데이터 부족으로 종목 제외 (길이: {_get_data_length(ohlcv_data)})")
@@ -771,10 +819,81 @@ class MarketScanner:
         divergence_analysis = self._get_divergence_analysis(stock_code, ohlcv_data)
         divergence_signal = self._get_divergence_signal(divergence_analysis) if divergence_analysis else None
         
+        # ------------------------------------------------------------
+        # 🆕 시간외(전날 16~18시) 단일가 현재가 기반 갭 스코어 추가
+        #   - get_preopen_overtime_price() 사용
+        #   - 갭폭이 클수록 가산 (양(+)) / 감산 (음(-))
+        # ------------------------------------------------------------
+        preopen_score = 0
+        try:
+            from api.kis_preopen_api import get_preopen_overtime_price
+
+            pre_df = get_preopen_overtime_price(stock_code)
+            if pre_df is not None and not pre_df.empty:
+                row = pre_df.iloc[0]
+                after_price = float(row.get('ovtm_untp_prpr', 0))
+                after_volume = float(row.get('ovtm_untp_vol', 0))
+
+                pre_trading_value = after_price * after_volume  # 원 단위
+
+                # 거래정지(또는 위험+1) 표시가 있으면 즉시 제외
+                if str(row.get('trht_yn', 'N')).upper() == 'Y':
+                    logger.debug(f"🚫 {stock_code} 거래정지 표시 – 제외")
+                    return None
+
+                # 시간외 거래대금 점수화
+                if pre_trading_value >= 500_000_000:       # 5억 이상
+                    pre_val_score = 10
+                elif pre_trading_value >= 100_000_000:     # 1억 이상
+                    pre_val_score = 5
+                elif pre_trading_value >= 50_000_000:      # 0.5억 이상
+                    pre_val_score = 0
+                else:
+                    pre_val_score = -5
+
+                min_pre_val = self.performance_config.get('preopen_min_trading_value', 50_000_000)
+
+                # 저거래대금이면 즉시 제외
+                if pre_trading_value < min_pre_val:
+                    logger.debug(
+                        f"📊 {stock_code} 시간외 거래대금 {pre_trading_value/1_000_000:,.1f}M <"
+                        f" min_pre_val({min_pre_val/1_000_000}M) – 제외")
+                    return None
+
+                # 전일 종가(최근 일봉 close)를 구해 갭 계산
+                try:
+                    data_list = _convert_to_dict_list(ohlcv_data)
+                    yesterday_close = float(data_list[0].get('stck_clpr', 0)) if data_list else 0
+                except Exception:
+                    yesterday_close = 0
+
+                if after_price > 0 and yesterday_close > 0:
+                    gap_rate = (after_price - yesterday_close) / yesterday_close * 100
+
+                    if gap_rate >= 5:
+                        gap_score = 10
+                    elif gap_rate >= 3:
+                        gap_score = 7
+                    elif gap_rate >= 1:
+                        gap_score = 4
+                    elif gap_rate <= -3:
+                        gap_score = -5
+                    elif gap_rate <= -1:
+                        gap_score = -2
+                    else:
+                        gap_score = 0
+
+                    preopen_score = gap_score + pre_val_score
+
+                    logger.debug(
+                        f"📊 {stock_code} 시간외 갭 {gap_rate:+.2f}% → preopen_score {preopen_score:+}")
+        except Exception as e:
+            logger.debug(f"📊 {stock_code} 시간외 단일가 API 실패: {e}")
+        
         # 점수 계산 (가중치 최적화) - 실전 트레이딩 기준 조정
         volume_score = min(fundamentals['volume_increase_rate'] * 10, 22)  # 최대 22점 (22%)
         technical_score = (fundamentals['rsi'] / 100) * 18  # 최대 18점 (18%)
-        pattern_score = patterns['total_pattern_score'] * 18  # 최대 18점 (18%)
+        pattern_score = patterns['pattern_score']  # 최대 18점 (18%)
         ma_score = 15 if fundamentals['ma_alignment'] else 0  # 15점 (15%) - 정배열 중요
         momentum_score = min(fundamentals['price_change_rate'] * 100, 8)  # 최대 8점 (8%)
         
@@ -793,7 +912,8 @@ class MarketScanner:
             else:
                 divergence_score = 2  # HOLD도 중립적 가산점 (이격도 정상 = 안정적)
         
-        total_score = volume_score + technical_score + pattern_score + ma_score + momentum_score + divergence_score
+        total_score = (volume_score + technical_score + pattern_score + ma_score +
+                       momentum_score + divergence_score + preopen_score)
         
         # 🆕 디버깅 로그에 이격도 점수 추가
         divergence_info = ""
@@ -803,9 +923,10 @@ class MarketScanner:
             signal_type = divergence_signal.get('signal', 'HOLD')
             divergence_info = f"이격도({divergence_score:.1f}, 20일선:{sma_20_div:.1f}%, {signal_type}) + "
         
-        logger.debug(f"📊 {stock_code} 점수 계산 완료: 거래량({volume_score:.1f}) + 기술적({technical_score:.1f}) + "
-                    f"패턴({pattern_score:.1f}) + MA({ma_score:.1f}) + 모멘텀({momentum_score:.1f}) + "
-                    f"{divergence_info}= {total_score:.1f}")
+        logger.debug(
+            f"📊 {stock_code} 점수 계산 완료: 거래량({volume_score:.1f}) + 기술적({technical_score:.1f}) + "
+            f"패턴({pattern_score:.1f}) + MA({ma_score:.1f}) + 모멘텀({momentum_score:.1f}) + "
+            f"이격도({divergence_score:+.1f}) + 시간외({preopen_score:+}) = {total_score:.1f}")
         
         return min(total_score, 100)  # 최대 100점
     
@@ -846,7 +967,7 @@ class MarketScanner:
             divergence_analysis = self._get_divergence_analysis(stock_code, ohlcv_data)
             
             return {
-                'pattern_score': pattern_analysis.get('total_score', 0) if pattern_analysis else 0,
+                'pattern_score': pattern_analysis.get('pattern_score', 0) if pattern_analysis else 0,
                 'pattern_names': pattern_analysis.get('detected_patterns', []) if pattern_analysis else [],
                 'rsi': fundamentals.get('rsi', 50),
                 'macd': fundamentals.get('macd_signal', 0),

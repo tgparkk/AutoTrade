@@ -24,17 +24,33 @@ logger = setup_logger(__name__)
 
 
 def _fetch(url: str, tr_id: str, params: dict) -> Optional[pd.DataFrame]:
-    """공통 fetch 래퍼 - 성공 시 DataFrame 반환"""
+    """공통 fetch 래퍼 – 성공 시 DataFrame 반환
+
+    * 여러 output 필드(`output`, `output1`, `output2` …)를 모두 수집해 단일
+      `pd.DataFrame` 으로 병합한다.
+    """
     try:
         res = kis._url_fetch(url, tr_id, "", params)
         if res and res.isOK():
             body = res.getBody()
-            output = getattr(body, "output", getattr(body, "Output", []))
-            if output:
-                return pd.DataFrame(output)
+
+            # output* 속성을 모두 모은다.
+            records = []
+            for attr in dir(body):
+                if attr.lower().startswith("output"):
+                    val = getattr(body, attr)
+                    if isinstance(val, list):
+                        records.extend(val)
+                    elif isinstance(val, dict):
+                        records.append(val)
+
+            if records:
+                return pd.DataFrame(records)
+
             logger.debug(f"{tr_id} 데이터 없음")
             return pd.DataFrame()
-        logger.error(f"{tr_id} 호출 실패")
+
+        logger.error(f"{tr_id} 호출 실패 – rt_cd={getattr(res.getBody(), 'rt_cd', '?') if res else 'N/A'}")
         return None
     except Exception as e:
         logger.error(f"{tr_id} 호출 오류: {e}")
@@ -45,14 +61,18 @@ def _fetch(url: str, tr_id: str, params: dict) -> Optional[pd.DataFrame]:
 # ------------------------------------------------------------
 
 def get_preopen_time_itemconclusion(itm_no: str, inqr_hour: str = "08") -> Optional[pd.DataFrame]:
-    """08시대 분·초 단위 체결내역 (TR: FHKST01010900)"""
+    """당일 시간대별 체결 (TR: FHPST01060000)
+
+    Args:
+        itm_no: 종목코드 (6자리)
+        inqr_hour: 조회 기준 시작 HH(또는 HHMMSS) – 장전 08, 장중 09 등
+    """
     url = "/uapi/domestic-stock/v1/quotations/inquire-time-itemconclusion"
-    tr_id = "FHKST01010900"
+    tr_id = "FHPST01060000"
     params = {
+        "FID_COND_MRKT_DIV_CODE": "J",   # 주식
         "FID_INPUT_ISCD": itm_no,
-        "FID_INPUT_HOUR_1": inqr_hour,  # 08 ~09 사이 시간 지정
-        "FID_PW_DATA_INDV_YN": "N",
-        "FID_PERIOD_DIV_CODE": "1"  # 1:시간, 2:일자
+        "FID_INPUT_HOUR_1": inqr_hour.zfill(2),
     }
     return _fetch(url, tr_id, params)
 
@@ -61,25 +81,27 @@ def get_preopen_time_itemconclusion(itm_no: str, inqr_hour: str = "08") -> Optio
 # ------------------------------------------------------------
 
 def get_preopen_daily_overtimeprice(itm_no: str) -> Optional[pd.DataFrame]:
-    """전일 시간외 단일가 종가 (TR: FHKST01040200)"""
+    """최근 30일 시간외 단일가 일자별 종가 (TR: FHPST02320000)"""
     url = "/uapi/domestic-stock/v1/quotations/inquire-daily-overtimeprice"
-    tr_id = "FHKST01040200"
-    params = {"FID_INPUT_ISCD": itm_no}
+    tr_id = "FHPST02320000"
+    params = {
+        "FID_COND_MRKT_DIV_CODE": "J",  # 주식
+        "FID_INPUT_ISCD": itm_no,
+    }
     return _fetch(url, tr_id, params)
 
 # ------------------------------------------------------------
 # 3. 시간외 단일가 분봉 체결내역
 # ------------------------------------------------------------
 
-def get_preopen_time_overtimeconclusion(itm_no: str, inqr_hour: str = "16") -> Optional[pd.DataFrame]:
-    """16~18시 시간외 단일가 분·초 체결 (TR: FHKST01040500)"""
+def get_preopen_time_overtimeconclusion(itm_no: str) -> Optional[pd.DataFrame]:
+    """시간외 단일가 시간별 체결 (TR: FHPST02310000)"""
     url = "/uapi/domestic-stock/v1/quotations/inquire-time-overtimeconclusion"
-    tr_id = "FHKST01040500"
+    tr_id = "FHPST02310000"
     params = {
+        "FID_COND_MRKT_DIV_CODE": "J",
         "FID_INPUT_ISCD": itm_no,
-        "FID_INPUT_HOUR_1": inqr_hour,
-        "FID_PW_DATA_INDV_YN": "N",
-        "FID_PERIOD_DIV_CODE": "1"
+        "FID_HOUR_CLS_CODE": "1",  # 1: 시간외
     }
     return _fetch(url, tr_id, params)
 
@@ -88,10 +110,13 @@ def get_preopen_time_overtimeconclusion(itm_no: str, inqr_hour: str = "16") -> O
 # ------------------------------------------------------------
 
 def get_preopen_overtime_price(itm_no: str) -> Optional[pd.DataFrame]:
-    """시간외 단일가 현재가 (TR: FHKST01040100)"""
+    """시간외 단일가 현재가 (TR: FHPST02300000 – 실전 전용)"""
     url = "/uapi/domestic-stock/v1/quotations/inquire-overtime-price"
-    tr_id = "FHKST01040100"
-    params = {"FID_INPUT_ISCD": itm_no}
+    tr_id = "FHPST02300000"
+    params = {
+        "FID_COND_MRKT_DIV_CODE": "J",
+        "FID_INPUT_ISCD": itm_no,
+    }
     return _fetch(url, tr_id, params)
 
 # ------------------------------------------------------------
@@ -99,10 +124,13 @@ def get_preopen_overtime_price(itm_no: str) -> Optional[pd.DataFrame]:
 # ------------------------------------------------------------
 
 def get_preopen_overtime_asking_price(itm_no: str) -> Optional[pd.DataFrame]:
-    """시간외 단일가 호가/잔량 (TR: FHKST01040300)"""
+    """시간외 단일가 호가/잔량 (TR: FHPST02300400 – 실전 전용)"""
     url = "/uapi/domestic-stock/v1/quotations/inquire-overtime-asking-price"
-    tr_id = "FHKST01040300"
-    params = {"FID_INPUT_ISCD": itm_no, "FID_FCNG_DT": now_kst().strftime("%Y%m%d")}
+    tr_id = "FHPST02300400"
+    params = {
+        "FID_COND_MRKT_DIV_CODE": "J",
+        "FID_INPUT_ISCD": itm_no,
+    }
     return _fetch(url, tr_id, params)
 
 __all__ = [
