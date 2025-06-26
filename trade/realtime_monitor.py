@@ -858,8 +858,11 @@ class RealTimeMonitor:
             # 30분 간격 체크
             should_scan = False
             if self.last_intraday_scan_time is None:
-                # 첫 실행: 10:00 이후부터 시작
-                if current_time.hour >= 10:
+                # 첫 실행: 시장 개장 후 지정된 offset(분) 경과 시점부터 시작
+                offset_minutes = self.performance_config.get('first_intraday_scan_offset_minutes', 15)
+                open_minutes = self.market_open_time.hour * 60 + self.market_open_time.minute
+                now_minutes = current_time.hour * 60 + current_time.minute
+                if now_minutes >= open_minutes + offset_minutes:
                     should_scan = True
             else:
                 # 마지막 스캔으로부터 intraday_scan_interval 분 경과 체크

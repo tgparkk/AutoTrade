@@ -180,8 +180,8 @@ class MarketScanner:
                     logger.debug(f"점수 계산 실패로 종목 제외: {stock_code}")
                     continue
                 
-                # 최소 점수 기준 적용 (70점 이상)
-                min_score = self.strategy_config.get('min_signal_confidence', 0.7) * 100
+                # 최소 점수 기준 – PERFORMANCE.opening_pattern_score_threshold 값을 사용
+                min_score = self.performance_config.get('opening_pattern_score_threshold', 55.0)
                 if score >= min_score:
                     scored_stocks.append((stock_code, score))
                     
