@@ -296,7 +296,23 @@ class TradingConfigLoader:
             'normal_monitoring_interval': self.get_int('normal_monitoring_interval', section, 10),
             'market_volatility_threshold': self.get_float('market_volatility_threshold', section, 0.02),
             'high_volume_threshold': self.get_float('high_volume_threshold', section, 3.0),
-            'high_volatility_position_ratio': self.get_float('high_volatility_position_ratio', section, 0.3)
+            'high_volatility_position_ratio': self.get_float('high_volatility_position_ratio', section, 0.3),
+
+            # 🆕 데이트레이딩 특화 최소 모멘텀/점수 설정
+            'min_momentum_opening': self.get_int('min_momentum_opening', section, 20),
+            'min_momentum_preclose': self.get_int('min_momentum_preclose', section, 25),
+            'min_momentum_normal': self.get_int('min_momentum_normal', section, 15),
+
+            # 🆕 시장 단계별 총점 기준치
+            'buy_score_opening_threshold': self.get_int('buy_score_opening_threshold', section, 70),
+            'buy_score_preclose_threshold': self.get_int('buy_score_preclose_threshold', section, 75),
+            'buy_score_normal_threshold': self.get_int('buy_score_normal_threshold', section, 60),
+
+            # 🆕 시장 단계별 추가 배수 / 패턴 점수 기준
+            'opening_buy_ratio_multiplier': self.get_float('opening_buy_ratio_multiplier', section, 1.1),
+            'preclose_buy_ratio_multiplier': self.get_float('preclose_buy_ratio_multiplier', section, 1.2),
+            'opening_pattern_score_threshold': self.get_float('opening_pattern_score_threshold', section, 75.0),
+            'normal_pattern_score_threshold': self.get_float('normal_pattern_score_threshold', section, 70.0),
         }
         
         logger.info("성능 설정 로드 완료")

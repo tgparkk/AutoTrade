@@ -49,7 +49,7 @@ class BuyConditionAnalyzer:
             
             min_momentum_score = BuyConditionAnalyzer._get_min_momentum_score(market_phase, performance_config)
             if momentum_score < min_momentum_score:
-                logger.info(f"❌ 모멘텀 부족 제외: {stock.stock_code}({stock.stock_name}) "
+                logger.debug(f"❌ 모멘텀 부족 제외: {stock.stock_code}({stock.stock_name}) "
                            f"모멘텀점수: {momentum_score}/{min_momentum_score}")
                 return False
             
@@ -530,19 +530,19 @@ class BuyConditionAnalyzer:
         
         if market_phase == 'opening':
             return {
-                'buy_ratio_min': buy_ratio_threshold * strategy_config.get('opening_buy_ratio_multiplier', 1.1),
-                'min_pattern_score': strategy_config.get('opening_pattern_score_threshold', 75.0),
+                'buy_ratio_min': buy_ratio_threshold * performance_config.get('opening_buy_ratio_multiplier', 1.1),
+                'min_pattern_score': performance_config.get('opening_pattern_score_threshold', 75.0),
                 'required_total_score': performance_config.get('buy_score_opening_threshold', 70)
             }
         elif market_phase == 'pre_close':
             return {
-                'buy_ratio_min': buy_ratio_threshold * strategy_config.get('preclose_buy_ratio_multiplier', 1.2),
-                'min_pattern_score': strategy_config.get('opening_pattern_score_threshold', 75.0),
+                'buy_ratio_min': buy_ratio_threshold * performance_config.get('preclose_buy_ratio_multiplier', 1.2),
+                'min_pattern_score': performance_config.get('opening_pattern_score_threshold', 75.0),
                 'required_total_score': performance_config.get('buy_score_preclose_threshold', 75)
             }
         else:
             return {
                 'buy_ratio_min': buy_ratio_threshold,
-                'min_pattern_score': strategy_config.get('normal_pattern_score_threshold', 70.0),
+                'min_pattern_score': performance_config.get('normal_pattern_score_threshold', 70.0),
                 'required_total_score': performance_config.get('buy_score_normal_threshold', 60)
             } 
