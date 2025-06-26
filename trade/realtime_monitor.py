@@ -117,6 +117,10 @@ class RealTimeMonitor:
         self._intraday_scan_result_queue = None
         self._intraday_scan_thread = None
         
+        # 🆕 중복 매수 쿨다운 관리 (Expectancy 개선)
+        self._recent_buy_times: Dict[str, datetime] = {}
+        self.duplicate_buy_cooldown = self.performance_config.get('duplicate_buy_cooldown_seconds', 10)
+        
         logger.info("RealTimeMonitor 초기화 완료 (웹소켓 기반 최적화 버전 + 장중추가스캔)")
     
     @property
@@ -393,6 +397,12 @@ class RealTimeMonitor:
         result = {'checked': 0, 'signaled': 0, 'ordered': 0}
         
         try:
+            # 장 마감 임박 시 신규 진입 금지 (데이트레이딩 수익성 보호)
+            now_time = now_kst().time()
+            if now_time >= self.pre_close_time or now_time >= self.day_trading_exit_time:
+                logger.debug("pre_close_time / day_trading_exit_time 이후 - 신규 매수 처리 생략")
+                return result
+            
             # 🔥 배치 처리로 락 경합 최소화 - 한 번에 두 상태 조회
             from models.stock import StockStatus
             batch_stocks = self.stock_manager.get_stocks_by_status_batch([
@@ -427,6 +437,21 @@ class RealTimeMonitor:
                     continue
                 
                 try:
+                    # --- 스프레드 가드 (슬리피지 보호) ---
+                    bid_p = realtime_data.get('bid_price', 0) or 0
+                    ask_p = realtime_data.get('ask_price', 0) or 0
+                    if bid_p > 0 and ask_p > 0:
+                        spread_pct = (ask_p - bid_p) / bid_p * 100
+                        if spread_pct > self.performance_config.get('max_spread_threshold', 5.0):
+                            logger.debug(f"스프레드 과대({spread_pct:.2f}%) - 매수 스킵: {stock.stock_code}")
+                            continue
+
+                    # --- 중복 매수 쿨다운 ---
+                    last_buy_time = self._recent_buy_times.get(stock.stock_code)
+                    if last_buy_time and (now_kst() - last_buy_time).total_seconds() < self.duplicate_buy_cooldown:
+                        logger.debug(f"쿨다운 미지남 - 중복 매수 스킵: {stock.stock_code}")
+                        continue
+
                     # 매수 조건 확인 (TradingConditionAnalyzer 내부에서 락 최적화됨)
                     if self.analyze_buy_conditions(stock, realtime_data):
                         result['signaled'] += 1
@@ -449,6 +474,9 @@ class RealTimeMonitor:
                                 # 🔥 원자적 통계 업데이트 (스레드 안전)
                                 with self._stats_lock:
                                     self._buy_orders_executed += 1
+                                
+                                # 최근 매수 시각 기록 (중복 방지)
+                                self._recent_buy_times[stock.stock_code] = now_kst()
                                 
                                 logger.info(f"📝 매수 주문 접수: {stock.stock_code} "
                                            f"{buy_quantity}주 @{realtime_data['current_price']:,}원 "
@@ -477,10 +505,11 @@ class RealTimeMonitor:
         
         try:
             # 🔥 배치 처리로 락 경합 최소화
-            # BOUGHT + PARTIAL_BOUGHT 모두 보유 포지션으로 간주
+            # BOUGHT + PARTIAL_BOUGHT + PARTIAL_SOLD 모두 보유 포지션으로 간주
             holding_stocks = (
                 self.stock_manager.get_stocks_by_status(StockStatus.BOUGHT)
                 + self.stock_manager.get_stocks_by_status(StockStatus.PARTIAL_BOUGHT)
+                + self.stock_manager.get_stocks_by_status(StockStatus.PARTIAL_SOLD)
             )
             
             # 빈 리스트면 조기 반환
