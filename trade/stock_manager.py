@@ -1137,7 +1137,7 @@ class StockManager:
                     account_no = parts[1]            # 계좌번호
                     order_no = parts[2]              # 주문번호
                     orig_order_no = parts[3]         # 원주문번호
-                    sell_buy_dvsn = parts[4]         # 매도매수구분 (01:매도, 02:매수)
+                    sell_buy_dvsn = parts[4]         # 매도매수구분
                     ord_dvsn = parts[5]              # 정정구분
                     ord_kind = parts[6]              # 주문종류
                     ord_cond = parts[7]              # 주문조건
@@ -1146,7 +1146,7 @@ class StockManager:
                     exec_price = float(parts[10]) if parts[10] else 0  # 체결단가
                     exec_time = parts[11]            # 주식체결시간
                     reject_yn = parts[12]            # 거부여부
-                    exec_yn = parts[13]              # 체결여부
+                    exec_yn = parts[13]              # 체결여부 (1:주문·정정·취소·거부, 2:체결)
                     receipt_yn = parts[14]           # 접수여부
                     branch_no = parts[15]            # 지점번호
                     ord_qty = int(parts[16]) if parts[16] else 0       # 주문수량
@@ -1157,6 +1157,18 @@ class StockManager:
                     exec_stock_name_40 = parts[21]   # 체결종목명40
                     ord_price = float(parts[22]) if parts[22] else 0   # 주문가격
                     
+                    # CNTG_YN 필드(체결여부) 확인 (actual_data가 dict인 경우)
+                    eflag = '2'
+                    if isinstance(actual_data, dict):
+                        eflag = actual_data.get('exec_yn', '2')
+                    if eflag != '2':
+                        logger.debug(f"체결 아님(CNTG_YN={eflag}) - 무시: {stock_code}")
+                        return
+
+                    # 이후 처리에 필요한 필드
+                    ord_type = actual_data.get('ord_gno_brno', '') if isinstance(actual_data, dict) else ''
+                    sell_buy_dvsn = actual_data.get('sll_buy_dvsn_cd', '') if isinstance(actual_data, dict) else ''  # 매도매수구분
+
                     # 파싱된 데이터로 체결통보 정보 구성
                     parsed_notice = {
                         'mksc_shrn_iscd': stock_code,        # 종목코드
@@ -1189,9 +1201,15 @@ class StockManager:
             
             exec_price = float(actual_data.get('exec_prce', 0))
             exec_qty = int(actual_data.get('exec_qty', 0))
-            ord_type = actual_data.get('ord_gno_brno', '')
-            sell_buy_dvsn = actual_data.get('sll_buy_dvsn_cd', '')  # 매도매수구분 (01:매도, 02:매수)
             
+            # CNTG_YN 필드(체결여부) 확인 (actual_data가 dict인 경우)
+            eflag = '2'
+            if isinstance(actual_data, dict):
+                eflag = actual_data.get('exec_yn', '2')
+            if eflag != '2':
+                logger.debug(f"체결 아님(CNTG_YN={eflag}) - 무시: {stock_code}")
+                return
+
             if exec_price <= 0 or exec_qty <= 0:
                 logger.warning(f"체결통보 - 잘못된 데이터: {stock_code} 가격:{exec_price} 수량:{exec_qty}")
                 return
