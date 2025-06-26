@@ -89,7 +89,8 @@ class MarketScanner:
         # 스크리닝 기준 (장전 스캔용)
         self.volume_increase_threshold = self.strategy_config.get('volume_increase_threshold', 2.0)
         self.volume_min_threshold = self.strategy_config.get('volume_min_threshold', 100000)
-        self.top_stocks_count = 15  # 상위 15개 종목 선정
+        # 상위 종목 선정 개수 – 설정 파일(max_premarket_selected_stocks)과 동기화
+        self.top_stocks_count = self.performance_config.get('max_premarket_selected_stocks', 15)
         
         # 🆕 장중 스캔 튜닝 파라미터
         self.rank_head_limit   = self.performance_config.get('intraday_rank_head_limit', 50)

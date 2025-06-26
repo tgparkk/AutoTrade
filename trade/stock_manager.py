@@ -1236,7 +1236,19 @@ class StockManager:
                 self._handle_sell_execution(stock_code, exec_price, exec_qty, ord_type)
             else:
                 logger.warning(f"알 수 없는 매도매수구분: {sell_buy_dvsn}")
-            
+
+            # 매도 전량 체결 후 웹소켓 구독 해제
+            if exec_qty == 0 and hasattr(self, 'websocket_manager') and self.websocket_manager:
+                try:
+                    if hasattr(self.websocket_manager, 'unsubscribe_stock_sync'):
+                        unsub_success = self.websocket_manager.unsubscribe_stock_sync(stock_code)
+                        if unsub_success:
+                            logger.info(f"📡 웹소켓 구독 해제 성공: {stock_code}")
+                        else:
+                            logger.warning(f"⚠️ 웹소켓 구독 해제 실패: {stock_code}")
+                except Exception as ws_e:
+                    logger.error(f"웹소켓 구독 해제 오류 {stock_code}: {ws_e}")
+
         except Exception as e:
             logger.error(f"체결 통보 처리 오류: {e}")
             logger.debug(f"체결통보 데이터 구조: {data}")
@@ -1410,6 +1422,19 @@ class StockManager:
 
                 logger.info(
                     f"✅ 매도 체결 처리: {stock_code} {exec_qty}주 @{exec_price:,}원 (누적 {filled_new}/{ordered_qty}주, 잔량 {remaining_qty})")
+
+                # 매도 전량 체결 후 웹소켓 구독 해제
+                if remaining_qty == 0 and hasattr(self, 'websocket_manager') and self.websocket_manager:
+                    try:
+                        if hasattr(self.websocket_manager, 'unsubscribe_stock_sync'):
+                            unsub_success = self.websocket_manager.unsubscribe_stock_sync(stock_code)
+                            if unsub_success:
+                                logger.info(f"📡 웹소켓 구독 해제 성공: {stock_code}")
+                            else:
+                                logger.warning(f"⚠️ 웹소켓 구독 해제 실패: {stock_code}")
+                    except Exception as ws_e:
+                        logger.error(f"웹소켓 구독 해제 오류 {stock_code}: {ws_e}")
+
             else:
                 logger.error(f"❌ 매도 체결 상태 업데이트 실패: {stock_code}")
         except Exception as e:

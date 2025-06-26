@@ -800,6 +800,11 @@ class RealTimeMonitor:
             #if market_phase not in ['active']:
             #    return
             
+            # 마감 전(pre_close_time) 이후에는 신규 스캔을 하지 않는다.
+            if current_time.time() >= self.pre_close_time:
+                logger.debug("마감 전 시간 이후 - intraday 스캔 생략")
+                return
+
             # 🔥 총 관찰 종목 수 제한 확인 (웹소켓 한도 고려)
             websocket_max = self.performance_config.get('websocket_max_connections', 41)
             connections_per_stock = self.performance_config.get('websocket_connections_per_stock', 2)

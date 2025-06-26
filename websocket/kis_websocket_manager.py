@@ -362,6 +362,31 @@ class KISWebSocketManager:
 
         return False
 
+    def unsubscribe_stock_sync(self, stock_code: str) -> bool:
+        """종목 구독 해제 (동기 방식)"""
+        # 연결 여부 검사
+        if not self.connection.is_connected:
+            return False
+
+        # 이미 구독이 없으면 성공으로 간주
+        if not self.subscription_manager.is_subscribed(stock_code):
+            return True
+
+        # 이벤트 루프를 통한 비동기 실행
+        if self._event_loop and not self._event_loop.is_closed():
+            import asyncio
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    self.unsubscribe_stock(stock_code),
+                    self._event_loop
+                )
+                return future.result(timeout=10)
+            except Exception as e:
+                logger.error(f"동기 구독 해제 오류 ({stock_code}): {e}")
+        else:
+            logger.warning("이벤트 루프가 종료되었거나 존재하지 않습니다 - 구독 해제 실패")
+        return False
+
     async def unsubscribe_stock(self, stock_code: str) -> bool:
         """종목 구독 해제"""
         try:
