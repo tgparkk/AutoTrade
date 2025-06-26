@@ -964,7 +964,7 @@ class StockManager:
                 realtime.contract_strength = contract_strength
                 realtime.buy_ratio = buy_ratio
                 realtime.market_pressure = market_pressure
-                realtime.vi_standard_price = vi_standard_price
+                realtime.vi_standard_price = vi_standard_price  # is_vi False이면 0 저장
                 realtime.trading_halt = trading_halt
                 
                 # 전일 대비 정보 업데이트
@@ -1032,7 +1032,15 @@ class StockManager:
                 # 특이 상황 로그
                 if trading_halt:
                     logger.warning(f"🚨 거래정지: {stock_code}")
-                if vi_standard_price > 0:
+                
+                # 🆕 VI 발동 여부 재판정 (HOUR_CLS_CODE 51/52 or NEW_MKOP_CLS_CODE 30/31)
+                is_vi = (hour_cls_code in ['51', '52']) or (market_operation_code in ['30', '31'])
+                if not is_vi:
+                    # 실제 VI 상태가 아닌 경우 기준가 무효화
+                    vi_standard_price = 0
+                
+                # 로그는 실제 VI 발생시에만 출력
+                if is_vi and vi_standard_price > 0:
                     logger.warning(f"⚠️ VI 발동: {stock_code} 기준가:{vi_standard_price:,}원")
             
             # 미실현 손익 계산 (별도 락으로 분리하여 성능 최적화)

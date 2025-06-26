@@ -137,8 +137,12 @@ class BuyConditionAnalyzer:
             vi_standard_price = getattr(stock.realtime_data, 'vi_standard_price', 0)
             trading_halt = getattr(stock.realtime_data, 'trading_halt', False)
             
-            if trading_halt or vi_standard_price > 0:
-                logger.debug(f"거래 제외: {stock.stock_code} (거래정지: {trading_halt}, VI발동: {vi_standard_price > 0})")
+            hour_cls_code = getattr(stock.realtime_data, 'hour_cls_code', '0')
+            market_op_code = getattr(stock.realtime_data, 'market_operation_code', '20')
+            is_vi = (hour_cls_code in ['51', '52']) or (market_op_code in ['30', '31'])
+            
+            if trading_halt or is_vi:
+                logger.debug(f"거래 제외: {stock.stock_code} (거래정지: {trading_halt}, VI발동: {is_vi})")
                 return False
             
             # 가격 정보 확인
