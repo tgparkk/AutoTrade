@@ -156,18 +156,6 @@ class MarketScanner:
         all_stocks = stock_loader.stock_list
         
         logger.info(f"KOSPI 전체 종목 수: {len(all_stocks)}")
-        
-        # 2-1. 상승률 랭킹 상위 N 종목 풀 확보 (API 오류 시 전체로 대체)
-        try:
-            from api.kis_market_api import get_price_ranking
-            rank_df = get_price_ranking('up', self.rank_head_limit)
-            if rank_df is not None and not rank_df.empty:
-                rank_codes = set(rank_df['stck_shrn_iscd'].astype(str).str.zfill(6).tolist())
-            else:
-                rank_codes = set()
-        except Exception as e:
-            logger.debug(f"랭킹 API 실패: {e}")
-            rank_codes = set()
 
         # 전체 KOSPI 종목 중 우선주·스팩 제외
         base_candidates = [
@@ -175,16 +163,11 @@ class MarketScanner:
             if stock['code'].isdigit() and len(stock['code']) == 6 and '우' not in stock['name']
         ]
 
-        if rank_codes:
-            scan_candidates = [s for s in base_candidates if s['code'] in rank_codes]
-            logger.info(f"랭킹 상위 {len(rank_codes)}개 중 {len(scan_candidates)}개 코드 필터 적용")
-        else:
-            scan_candidates = base_candidates
-        
+
         # 2. 각 종목별 종합 점수 계산
         scored_stocks = []
         
-        for stock in scan_candidates:
+        for stock in base_candidates: # scan_candidates
             try:
                 stock_code = stock['code']
                 
@@ -252,10 +235,11 @@ class MarketScanner:
             previous_avg_vol = sum(previous_volumes) / len(previous_volumes) if previous_volumes else 1
             volume_increase_rate = recent_avg_vol / previous_avg_vol if previous_avg_vol > 0 else 1
 
-            # 전체 20일 평균 거래량 및 거래대금(저유동 필터용)
-            all_volumes = [float(day.get('acml_vol', 0)) for day in recent_data]
-            avg_daily_volume_20d = sum(all_volumes) / len(all_volumes) if all_volumes else 0
-            avg_daily_trading_value = avg_daily_volume_20d * float(recent_data[0].get('stck_clpr', 0))  # 원단위
+            # 전체 10일 평균 거래량 및 거래대금(저유동 필터용) – 최근 10일로 완화
+            ten_day_data = recent_data[:10]
+            all_volumes_10d = [float(day.get('acml_vol', 0)) for day in ten_day_data]
+            avg_daily_volume_10d = sum(all_volumes_10d) / len(all_volumes_10d) if all_volumes_10d else 0
+            avg_daily_trading_value = avg_daily_volume_10d * float(recent_data[0].get('stck_clpr', 0))  # 원단위
             
             # 가격 변동률 (전일 대비)
             today_close = float(recent_data[0].get('stck_clpr', 0))
@@ -284,7 +268,7 @@ class MarketScanner:
             return {
                 'volume_increase_rate': volume_increase_rate,
                 'yesterday_volume': int(recent_volumes[1]) if len(recent_volumes) > 1 else 0,
-                'avg_daily_volume': avg_daily_volume_20d,
+                'avg_daily_volume': avg_daily_volume_10d,
                 'avg_daily_trading_value': avg_daily_trading_value,
                 'price_change_rate': price_change_rate,
                 'rsi': rsi,
