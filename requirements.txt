@@ -32,9 +32,14 @@ plotly>=5.15.0
 # 웹소켓 (실시간 데이터)
 websockets>=11.0
 
+# 암호화
+pycryptodome>=3.20
+
 # 시스템 모니터링
 psutil>=5.9.0
 
 # 개발/테스트용
 pytest>=7.4.0
 pytest-asyncio>=0.21.0 
+
+

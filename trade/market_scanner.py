@@ -6,6 +6,7 @@ from typing import Dict, List, Tuple, Optional, Any, TYPE_CHECKING
 from datetime import datetime, timedelta
 from models.stock import Stock
 from .stock_manager import StockManager
+from models.stock import StockStatus  # 상태 확인용
 
 if TYPE_CHECKING:
     from websocket.kis_websocket_manager import KISWebSocketManager
@@ -83,11 +84,20 @@ class MarketScanner:
         # 설정 로드
         self.config_loader = get_trading_config_loader()
         self.strategy_config = self.config_loader.load_trading_strategy_config()
+        self.performance_config = self.config_loader.load_performance_config()
         
-        # 스크리닝 기준
+        # 스크리닝 기준 (장전 스캔용)
         self.volume_increase_threshold = self.strategy_config.get('volume_increase_threshold', 2.0)
         self.volume_min_threshold = self.strategy_config.get('volume_min_threshold', 100000)
         self.top_stocks_count = 15  # 상위 15개 종목 선정
+        
+        # 🆕 장중 스캔 튜닝 파라미터
+        self.rank_head_limit   = self.performance_config.get('intraday_rank_head_limit', 50)
+        self.min_total_score   = self.performance_config.get('intraday_min_total_score', 18)
+        # 단위: 백만원 → 원
+        self.min_trading_value = self.performance_config.get('intraday_min_trading_value', 2000) * 1_000_000
+        self.max_spread_pct    = self.performance_config.get('intraday_max_spread_percent', 2.0)
+        self.reinclude_sold    = self.performance_config.get('intraday_reinclude_sold', True)
         
         # 🆕 데이터베이스는 싱글톤 패턴으로 필요시 생성
         logger.info("✅ MarketScanner 초기화 완료 (데이터베이스는 필요시 생성)")
@@ -1134,6 +1144,9 @@ class MarketScanner:
         logger.info(f"🔍 장중 추가 종목 스캔 시작 (목표: {max_stocks}개)")
         
         try:
+            from utils.stock_data_loader import get_stock_data_loader
+            stock_loader = get_stock_data_loader()
+
             from api.kis_market_api import (
                 get_disparity_rank, get_fluctuation_rank, 
                 get_volume_rank, get_bulk_trans_num_rank
@@ -1154,16 +1167,21 @@ class MarketScanner:
             )
             
             if disparity_data is not None and len(disparity_data) > 0:
-                for idx, row in disparity_data.head(10).iterrows():
+                for idx, row in disparity_data.head(self.rank_head_limit).iterrows():
                     code = row.get('mksc_shrn_iscd', '')
-                    if code and code not in excluded_codes:
+                    if code and code not in excluded_codes and code in stock_loader:
                         disparity_rate = float(row.get('dspr', 0))
-                        if disparity_rate <= -2.5:  # 과매도 기준
-                            score = min(abs(disparity_rate) * 3, 25)  # 최대 25점
+                        if disparity_rate <= -3.0:  # 과매도 기준 강화
+                            score = min(abs(disparity_rate) * 2, 20)  # 최대 20점
                             if code not in candidate_stocks:
                                 candidate_stocks[code] = {'score': 0, 'reasons': []}
                             candidate_stocks[code]['score'] += score
                             candidate_stocks[code]['reasons'].append(f"이격도과매도({disparity_rate:.1f}%)")
+                            # 거래대금 정보 보존 (있다면)
+                            tv = float(row.get('acml_tr_pbmn', 0))
+                            current_tv = candidate_stocks[code].get('trading_value', 0)
+                            if tv > current_tv:
+                                candidate_stocks[code]['trading_value'] = tv
             
             # 2. 등락률 순위 (상승 모멘텀) - 두 번째 중요
             logger.debug("📊 등락률 순위 조회 (상승)")
@@ -1175,16 +1193,21 @@ class MarketScanner:
             )
             
             if fluctuation_data is not None and len(fluctuation_data) > 0:
-                for idx, row in fluctuation_data.head(15).iterrows():
+                for idx, row in fluctuation_data.head(self.rank_head_limit).iterrows():
                     code = row.get('mksc_shrn_iscd', '')
-                    if code and code not in excluded_codes:
+                    if code and code not in excluded_codes and code in stock_loader:
                         change_rate = float(row.get('prdy_ctrt', 0))
-                        if 1.0 <= change_rate <= 8.0:  # 적정 상승률
-                            score = min(change_rate * 2, 15)  # 최대 15점
+                        if 0.5 <= change_rate <= 10.0:  # 완화된 구간
+                            score = min(change_rate * 1.5, 15)  # 최대 15점
                             if code not in candidate_stocks:
                                 candidate_stocks[code] = {'score': 0, 'reasons': []}
                             candidate_stocks[code]['score'] += score
                             candidate_stocks[code]['reasons'].append(f"상승모멘텀({change_rate:.1f}%)")
+                            # 거래대금 정보 보존 (있다면)
+                            tv = float(row.get('acml_tr_pbmn', 0))
+                            current_tv = candidate_stocks[code].get('trading_value', 0)
+                            if tv > current_tv:
+                                candidate_stocks[code]['trading_value'] = tv
             
             # 3. 거래량 순위 (관심도) - 세 번째
             logger.debug("📊 거래량 순위 조회")
@@ -1194,16 +1217,21 @@ class MarketScanner:
             )
             
             if volume_data is not None and len(volume_data) > 0:
-                for idx, row in volume_data.head(20).iterrows():
+                for idx, row in volume_data.head(self.rank_head_limit).iterrows():
                     code = row.get('mksc_shrn_iscd', '')
-                    if code and code not in excluded_codes:
+                    if code and code not in excluded_codes and code in stock_loader:
                         volume_ratio = float(row.get('vol_inrt', 0))
-                        if volume_ratio >= 150:  # 150% 이상 거래량 증가
-                            score = min(volume_ratio / 20, 12)  # 최대 12점
+                        if volume_ratio >= 300:  # 300% 이상 거래량 증가
+                            score = min(volume_ratio / 15, 15)  # 최대 15점
                             if code not in candidate_stocks:
                                 candidate_stocks[code] = {'score': 0, 'reasons': []}
                             candidate_stocks[code]['score'] += score
                             candidate_stocks[code]['reasons'].append(f"거래량급증({volume_ratio:.0f}%)")
+                            # 거래대금 정보 보존 (있다면)
+                            tv = float(row.get('acml_tr_pbmn', 0))
+                            current_tv = candidate_stocks[code].get('trading_value', 0)
+                            if tv > current_tv:
+                                candidate_stocks[code]['trading_value'] = tv
             
             # 4. 체결강도 상위 (매수세) - 네 번째
             logger.debug("📊 체결강도 순위 조회")
@@ -1213,9 +1241,9 @@ class MarketScanner:
             )
             
             if strength_data is not None and len(strength_data) > 0:
-                for idx, row in strength_data.head(15).iterrows():
+                for idx, row in strength_data.head(self.rank_head_limit).iterrows():
                     code = row.get('mksc_shrn_iscd', '')
-                    if code and code not in excluded_codes:
+                    if code and code not in excluded_codes and code in stock_loader:
                         # 체결강도나 매수비율 관련 필드 확인 필요
                         # 임시로 기본 점수 부여
                         score = 8
@@ -1223,6 +1251,11 @@ class MarketScanner:
                             candidate_stocks[code] = {'score': 0, 'reasons': []}
                         candidate_stocks[code]['score'] += score
                         candidate_stocks[code]['reasons'].append("체결강도상위")
+                        # 거래대금 정보 보존 (있다면)
+                        tv = float(row.get('acml_tr_pbmn', 0))
+                        current_tv = candidate_stocks[code].get('trading_value', 0)
+                        if tv > current_tv:
+                            candidate_stocks[code]['trading_value'] = tv
             
             # 5. 최종 후보 선별 및 점수 계산
             final_candidates = []
@@ -1231,8 +1264,20 @@ class MarketScanner:
                 total_score = data['score']
                 reasons = ', '.join(data['reasons'])
                 
+                # 기존 종목 제외 로직 개선
+                if code in excluded_codes:
+                    if not (self.reinclude_sold and self.stock_manager.trading_status.get(code) == StockStatus.SOLD):
+                        continue
+
+                # 거래대금 필터 (가능하면 row 캐싱 필요)
+                # 값이 없는 경우 0 으로 처리
+                trading_value = float(data.get('trading_value', 0)) if isinstance(data, dict) else 0
+                if 0 < trading_value < self.min_trading_value:
+                    logger.debug(f"거래대금 부족으로 제외 {code}: {trading_value:,.0f}")
+                    continue
+
                 # 최소 점수 기준 (20점 이상)
-                if total_score >= 20:
+                if total_score >= self.min_total_score:
                     final_candidates.append((code, total_score, reasons))
             
             # 점수순 정렬 및 상위 선별
@@ -1242,8 +1287,6 @@ class MarketScanner:
             # 결과 로깅
             logger.info(f"✅ 장중 추가 종목 스캔 완료: {len(selected_stocks)}개 선별")
             for i, (code, score, reasons) in enumerate(selected_stocks, 1):
-                from utils.stock_data_loader import get_stock_data_loader
-                stock_loader = get_stock_data_loader()
                 stock_name = stock_loader.get_stock_name(code)
                 logger.info(f"  {i}. {code}[{stock_name}] - 점수:{score:.1f} ({reasons})")
             

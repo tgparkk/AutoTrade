@@ -5,26 +5,27 @@ KIS 웹소켓 데이터 파싱 전담 클래스
 from typing import Dict, Optional
 from utils.korean_time import now_kst
 from utils.logger import setup_logger
-
-# AES 복호화 (체결통보용)
-try:
-    from Crypto.Cipher import AES
-    from Crypto.Util.Padding import unpad
-    from base64 import b64decode
-    CRYPTO_AVAILABLE = True
-except ImportError:
-    CRYPTO_AVAILABLE = False
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import unpad
+from base64 import b64decode
 
 logger = setup_logger(__name__)
 
+# Crypto 라이브러리가 필수이므로 항상 True 로 설정
+CRYPTO_AVAILABLE = True
 
 class KISWebSocketDataParser:
     """KIS 웹소켓 데이터 파싱 전담 클래스"""
 
     def __init__(self):
         # 체결통보용 복호화 키
-        self.aes_key: Optional[str] = None
-        self.aes_iv: Optional[str] = None
+        # 원본 문자열 키/IV (디버깅용)
+        self._aes_key_str: Optional[str] = None
+        self._aes_iv_str: Optional[str] = None
+
+        # 실제 AES 복호화에 사용할 바이트 배열
+        self._aes_key_bytes: Optional[bytes] = None
+        self._aes_iv_bytes: Optional[bytes] = None
 
         # 통계
         self.stats = {
@@ -52,9 +53,66 @@ class KISWebSocketDataParser:
 
     def set_encryption_keys(self, aes_key: str, aes_iv: str):
         """체결통보 암호화 키 설정"""
-        self.aes_key = aes_key
-        self.aes_iv = aes_iv
-        logger.info("체결통보 암호화 키 설정 완료")
+        """
+        KIS 시스템 메시지에서 전달되는 KEY/IV 값은 Base64(또는 ASCII HEX)
+        형태일 수 있으므로, 실제 AES 복호화에 사용할 수 있도록 안전하게
+        디코딩한 뒤 바이트 배열로 저장한다.
+        """
+
+        import base64, binascii
+
+        def _to_bytes(value: str) -> Optional[bytes]:
+            """입력 문자열을 Base64 → HEX → UTF-8 순서로 디코딩 시도"""
+            if not value:
+                return None
+
+            # 1) ASCII 그대로 사용 (길이가 16/24/32 글자면 이미 충분)
+            if len(value) in (16, 24, 32):
+                try:
+                    return value.encode('utf-8')
+                except Exception:
+                    pass
+
+            # 2) HEX 시도 (32/48/64 글자)
+            try:
+                if all(c in '0123456789abcdefABCDEF' for c in value) and len(value) % 2 == 0:
+                    decoded = binascii.unhexlify(value)
+                    if len(decoded) in (16, 24, 32):
+                        return decoded
+            except Exception:
+                pass
+
+            # 3) Base64 시도 (보통 24/32/44 글자)
+            try:
+                decoded = base64.b64decode(value)
+                if len(decoded) in (16, 24, 32):
+                    return decoded
+            except Exception:
+                pass
+
+            # 4) 그래도 안 되면 UTF-8 bytes 그대로 사용 (마지막 수단)
+            try:
+                utf8_bytes = value.encode("utf-8")
+                if len(utf8_bytes) in (16, 24, 32):
+                    return utf8_bytes
+            except Exception:
+                pass
+
+            logger.warning(f"⚠️ AES 키/IV 길이가 16/24/32바이트가 아님 - 원본 사용: {len(value)} bytes")
+            return value.encode("utf-8")[:32]
+
+        # 원본 보관
+        self._aes_key_str = aes_key
+        self._aes_iv_str = aes_iv
+
+        # 안전 디코딩
+        self._aes_key_bytes = _to_bytes(aes_key)
+        self._aes_iv_bytes = _to_bytes(aes_iv)
+
+        if self._aes_key_bytes and self._aes_iv_bytes:
+            logger.info("✅ 체결통보 암호화 키/IV 디코딩 및 설정 완료")
+        else:
+            logger.error("❌ 체결통보 암호화 키/IV 설정 실패 - 복호화 불가")
 
     def parse_contract_data(self, data: str) -> Dict:
         """실시간 체결 데이터 파싱 (H0STCNT0) - KIS 공식 문서 기준"""
@@ -352,13 +410,22 @@ class KISWebSocketDataParser:
 
     def decrypt_notice_data(self, encrypted_data: str) -> str:
         """체결통보 데이터 복호화"""
-        if not CRYPTO_AVAILABLE or not self.aes_key or not self.aes_iv:
+        if not CRYPTO_AVAILABLE or not self._aes_key_bytes or not self._aes_iv_bytes:
             return ""
 
         try:
-            cipher = AES.new(self.aes_key.encode('utf-8'), AES.MODE_CBC, self.aes_iv.encode('utf-8'))
-            decrypted = unpad(cipher.decrypt(b64decode(encrypted_data)), AES.block_size)
-            return decrypted.decode('utf-8')
+            # 웹소켓에서 전달된 데이터는 Base64 인코딩이며 종종 '=' 패딩이 제거돼 온다.
+            from base64 import b64decode
+
+            def _b64decode_padded(data: str) -> bytes:
+                missing = (-len(data)) % 4
+                if missing:
+                    data += "=" * missing
+                return b64decode(data)
+
+            cipher = AES.new(self._aes_key_bytes, AES.MODE_CBC, self._aes_iv_bytes)
+            decrypted = unpad(cipher.decrypt(_b64decode_padded(encrypted_data)), AES.block_size)
+            return decrypted.decode('utf-8', errors='ignore')
 
         except Exception as e:
             logger.error(f"체결통보 복호화 오류: {e}")

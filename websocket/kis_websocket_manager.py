@@ -138,8 +138,8 @@ class KISWebSocketManager:
         return self.connect()
 
     def is_websocket_healthy(self) -> bool:
-        """웹소켓 건강성 체크"""
-        return self.connection.is_healthy()
+        """웹소켓 건강성 체크 (PINGPONG 또는 최근 메시지 기준)"""
+        return self.get_health_status().get('is_healthy', False)
 
     # ==========================================
     # 웹소켓 스레드 실행
@@ -478,11 +478,18 @@ class KISWebSocketManager:
             total_messages = self.stats.get('total_messages', 0)
             ping_pong_count = self.stats.get('ping_pong_count', 0)
             
+            # 최근 메시지 수신 시각 (실시간 데이터가 오면 PingPong이 없어도 정상으로 판단)
+            last_msg_time_dt = self.message_handler.stats.get('last_message_time')
+            last_msg_age = (now_kst() - last_msg_time_dt).total_seconds() if last_msg_time_dt else None
+            
             # 건강 상태 판정
             is_healthy = (
                 self.is_connected and 
                 self.is_running and
-                pingpong_age < 300  # 5분 이내에 PINGPONG 수신
+                (
+                    pingpong_age < 300     # 최근 PINGPONG
+                    or (last_msg_age is not None and last_msg_age < 60)  # 최근 실시간 메시지 수신 1분 이내
+                )
             )
             
             # PINGPONG 간격 계산 (최근 5개 평균)

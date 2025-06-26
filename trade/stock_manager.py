@@ -1165,9 +1165,12 @@ class StockManager:
                         logger.debug(f"체결 아님(CNTG_YN={eflag}) - 무시: {stock_code}")
                         return
 
-                    # 이후 처리에 필요한 필드
-                    ord_type = actual_data.get('ord_gno_brno', '') if isinstance(actual_data, dict) else ''
-                    sell_buy_dvsn = actual_data.get('sll_buy_dvsn_cd', '') if isinstance(actual_data, dict) else ''  # 매도매수구분
+                    # 이후 처리에 필요한 필드 (딕셔너리인 경우에만 덮어씀)
+                    if isinstance(actual_data, dict):
+                        ord_type = actual_data.get('ord_gno_brno', '')
+                        sell_buy_dvsn = actual_data.get('sll_buy_dvsn_cd', '')
+                    else:
+                        ord_type = ''  # 정보 없음
 
                     # 파싱된 데이터로 체결통보 정보 구성
                     parsed_notice = {
@@ -1307,12 +1310,14 @@ class StockManager:
                 realized_pnl_rate = (exec_price - buy_price) / buy_price * 100
             
             # 종목 상태를 SOLD로 변경하고 체결 정보 업데이트
+            now_ts = now_kst()
             success = self.change_stock_status(
                 stock_code=stock_code,
                 new_status=StockStatus.SOLD,
                 reason="sell_executed",
                 sell_price=exec_price,
-                sell_execution_time=now_kst(),
+                sell_execution_time=now_ts,
+                sell_order_time=now_ts,  # 주문 시간이 없을 경우 실행 시각으로 대체
                 realized_pnl=realized_pnl,
                 realized_pnl_rate=realized_pnl_rate
             )

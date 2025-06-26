@@ -99,21 +99,24 @@ class KISWebSocketMessageHandler:
                     # TR_ID 기반 콜백 실행 (StockManager 연동용) 
                     await self._execute_tr_id_callbacks(tr_id, parsed_data)
 
-            elif tr_id in [KIS_WSReq.NOTICE.value]:
-                # 체결통보 - 간단하게 처리
+            elif tr_id == KIS_WSReq.NOTICE.value:
+                # 체결통보 수신 (계좌 체결/접수)
                 logger.info(f"📢 체결통보 수신: {tr_id}")
-                
-                decrypted_data = self.data_parser.decrypt_notice_data(raw_data)
-                if decrypted_data:
-                    logger.info(f"✅ 체결통보 복호화 성공")
-                    execution_data = {'data': decrypted_data, 'timestamp': now_kst()}
-                    # TR_ID 기반 콜백 실행 (StockManager 연동용)
-                    await self._execute_tr_id_callbacks(tr_id, execution_data)
+
+                decrypted_data: Optional[str] = None
+                if encryption_flag == '1':
+                    # 암호화된 경우 복호화 시도
+                    decrypted_data = self.data_parser.decrypt_notice_data(raw_data)
+                    if not decrypted_data:
+                        logger.warning("❌ 체결통보 복호화 실패 - KEY/IV 설정 전일 수 있음, 건너뜀")
+                        return  # 복호화 실패 시 콜백 실행하지 않음
                 else:
-                    logger.warning(f"❌ 체결통보 복호화 실패 - 원본 데이터로 처리")
-                    execution_data = {'data': raw_data, 'timestamp': now_kst()}
-                    # TR_ID 기반 콜백 실행 (StockManager 연동용)
-                    await self._execute_tr_id_callbacks(tr_id, execution_data)
+                    # 암호화되지 않은 경우 그대로 사용
+                    decrypted_data = raw_data
+
+                # 콜백 실행 (StockManager)
+                execution_data = {'data': decrypted_data, 'timestamp': now_kst()}
+                await self._execute_tr_id_callbacks(tr_id, execution_data)
 
             else:
                 logger.warning(f"⚠️ 알 수 없는 TR_ID: {tr_id}")
@@ -156,11 +159,32 @@ class KISWebSocketMessageHandler:
                 if rt_cd == '0':  # 성공
                     logger.debug(f"시스템 메시지: {msg}")
 
-                    # 체결통보 암호화 키 저장
-                    output = body.get('output', {})
-                    if 'KEY' in output and 'IV' in output:
-                        self.data_parser.set_encryption_keys(output['KEY'], output['IV'])
+                    # output 정보는 body 안이나 최상위에 위치할 수 있다.
+                    output = body.get('output') if isinstance(body, dict) else None
+                    if output is None and 'output' in json_data:
+                        output = json_data['output']
+                    if output is None:
+                        output = {}
+
+                    # 일부 계정에서는 key/iv가 소문자 또는 다른 필드명으로 올 수 있으므로
+                    # 대소문자를 무시하고 검색한다.
+                    def _find_key(d: dict, *candidates):
+                        for c in candidates:
+                            if c in d:
+                                return d[c]
+                        return None
+
+                    key_val = _find_key(output, 'KEY', 'key', 'aes_key', 'AES_KEY')
+                    iv_val = _find_key(output, 'IV', 'iv', 'aes_iv', 'AES_IV')
+
+                    if key_val and iv_val:
+                        self.data_parser.set_encryption_keys(key_val, iv_val)
                         logger.info("✅ 체결통보 암호화 키 설정 완료")
+                        logger.debug(f"SYSTEM MSG RAW: {json_data}")
+                    else:
+                        logger.warning(f"⚠️ KEY/IV 필드 미발견 - output keys: {list(output.keys())}")
+                        # 디버깅용 전체 메시지 로그 (민감 정보 주의)
+                        logger.warning(f"SYSTEM MSG RAW: {json_data}")
                 else:
                     logger.warning(f"시스템 메시지 오류: {rt_cd} - {msg}")
 

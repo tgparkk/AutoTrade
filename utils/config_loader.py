@@ -21,7 +21,8 @@ class TradingConfigLoader:
             config_path: 거래 설정 파일 경로
         """
         self.config_path = config_path
-        self.config = configparser.ConfigParser()
+        # interpolation=None 으로 % 문자가 포함된 주석 오류 방지
+        self.config = configparser.ConfigParser(interpolation=None)
         self._load_config()
     
     def _load_config(self):
@@ -285,6 +286,12 @@ class TradingConfigLoader:
             'max_intraday_selected_stocks': self.get_int('max_intraday_selected_stocks', section, 10),
             'max_total_observable_stocks': self.get_int('max_total_observable_stocks', section, 20),
             'intraday_scan_interval_minutes': self.get_int('intraday_scan_interval_minutes', section, 30),
+            # 🔍 intraday scan tuning (신규)
+            'intraday_rank_head_limit': self.get_int('intraday_rank_head_limit', section, 50),
+            'intraday_min_total_score': self.get_int('intraday_min_total_score', section, 18),
+            'intraday_min_trading_value': self.get_int('intraday_min_trading_value', section, 2000),
+            'intraday_max_spread_percent': self.get_float('intraday_max_spread_percent', section, 2.0),
+            'intraday_reinclude_sold': self.get_bool('intraday_reinclude_sold', section, True),
             
             # 🆕 웹소켓 연결 설정
             'websocket_max_connections': self.get_int('websocket_max_connections', section, 41),
@@ -313,6 +320,10 @@ class TradingConfigLoader:
             'preclose_buy_ratio_multiplier': self.get_float('preclose_buy_ratio_multiplier', section, 1.2),
             'opening_pattern_score_threshold': self.get_float('opening_pattern_score_threshold', section, 75.0),
             'normal_pattern_score_threshold': self.get_float('normal_pattern_score_threshold', section, 70.0),
+
+            # 체결강도/쿨다운 신규
+            'min_contract_strength_for_buy': self.get_float('min_contract_strength_for_buy', section, 120.0),
+            'min_holding_minutes_before_sell': self.get_int('min_holding_minutes_before_sell', section, 1),
         }
         
         logger.info("성능 설정 로드 완료")

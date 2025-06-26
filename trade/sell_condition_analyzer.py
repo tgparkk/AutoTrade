@@ -20,7 +20,7 @@ class SellConditionAnalyzer:
     
     @staticmethod
     def analyze_sell_conditions(stock: Stock, realtime_data: Dict, market_phase: str,
-                               strategy_config: Dict, risk_config: Dict) -> Optional[str]:
+                               strategy_config: Dict, risk_config: Dict, performance_config: Dict) -> Optional[str]:
         """매도 조건 분석 (우선순위 기반 개선 버전)
         
         Args:
@@ -29,6 +29,7 @@ class SellConditionAnalyzer:
             market_phase: 시장 단계
             strategy_config: 전략 설정
             risk_config: 리스크 설정
+            performance_config: 성과 설정
             
         Returns:
             매도 사유 또는 None
@@ -82,7 +83,7 @@ class SellConditionAnalyzer:
             # === 우선순위 4: 기술적 지표 기반 매도 ===
             technical_sell_reason = SellConditionAnalyzer._check_technical_sell_conditions(
                 stock, realtime_data, current_pnl_rate, holding_minutes, 
-                market_phase, contract_strength, buy_ratio, market_pressure, strategy_config
+                market_phase, contract_strength, buy_ratio, market_pressure, strategy_config, performance_config
             )
             if technical_sell_reason:
                 return technical_sell_reason
@@ -202,11 +203,15 @@ class SellConditionAnalyzer:
     def _check_technical_sell_conditions(stock: Stock, realtime_data: Dict, current_pnl_rate: float,
                                         holding_minutes: float, market_phase: str, 
                                         contract_strength: float, buy_ratio: float,
-                                        market_pressure: str, strategy_config: Dict) -> Optional[str]:
+                                        market_pressure: str, strategy_config: Dict, performance_config: Dict) -> Optional[str]:
         """기술적 지표 기반 매도 조건 확인"""
-        # 체결강도 급락
+        # 최소 보유시간 이전이면 체결강도 약화 신호를 무시 (쿨다운)
+        cooldown_min = strategy_config.get('min_holding_minutes_before_sell', 
+                                           performance_config.get('min_holding_minutes_before_sell', 1))
+        within_cooldown = holding_minutes < cooldown_min
+        
         weak_contract_strength_threshold = strategy_config.get('weak_contract_strength_threshold', 80.0)
-        if contract_strength <= weak_contract_strength_threshold:
+        if (not within_cooldown) and contract_strength <= weak_contract_strength_threshold:
             if current_pnl_rate <= 0:
                 return "weak_contract_strength"
         

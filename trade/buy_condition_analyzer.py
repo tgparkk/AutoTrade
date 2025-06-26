@@ -39,7 +39,7 @@ class BuyConditionAnalyzer:
         """
         try:
             # === 🚨 1단계: 즉시 배제 조건 (속도 최적화) ===
-            if not BuyConditionAnalyzer._check_basic_eligibility(stock, realtime_data, strategy_config):
+            if not BuyConditionAnalyzer._check_basic_eligibility(stock, realtime_data, strategy_config, performance_config):
                 return False
             
             # === 🚀 2단계: 모멘텀 우선 검증 (데이트레이딩 핵심) ===
@@ -130,7 +130,7 @@ class BuyConditionAnalyzer:
             return False
     
     @staticmethod
-    def _check_basic_eligibility(stock: Stock, realtime_data: Dict, strategy_config: Dict) -> bool:
+    def _check_basic_eligibility(stock: Stock, realtime_data: Dict, strategy_config: Dict, performance_config: Dict) -> bool:
         """기본 적격성 체크 (즉시 배제 조건)"""
         try:
             # 거래정지, VI발동 등 절대 금지 조건
@@ -196,6 +196,14 @@ class BuyConditionAnalyzer:
                         logger.debug(f"유동성 부족 제외: {stock.stock_code} (스프레드: {spread_rate:.1f}%)")
                         return False
             
+            # 체결강도 최솟값 필터
+            contract_strength = getattr(stock.realtime_data, 'contract_strength', 100.0)
+            min_cs = strategy_config.get('min_contract_strength_for_buy',
+                                         performance_config.get('min_contract_strength_for_buy', 120.0))
+            if contract_strength < min_cs:
+                logger.debug(f"체결강도 부족 제외: {stock.stock_code} CS={contract_strength:.1f} < {min_cs}")
+                return False
+            
             return True
             
         except Exception as e:
@@ -242,17 +250,13 @@ class BuyConditionAnalyzer:
             elif volume_spike_ratio >= 1.2:  # 1.2배 이상
                 momentum_score += 2
             
-            # 3. 체결강도 모멘텀 (0~10점)
-            if contract_strength >= 150:  # 매우 강함
-                momentum_score += 10
-            elif contract_strength >= 130:  # 강함
+            # 3. 체결강도 모멘텀 (가중치 상향)
+            if contract_strength >= 150:
+                momentum_score += 15
+            elif contract_strength >= 130:
+                momentum_score += 12
+            elif contract_strength >= 120:
                 momentum_score += 8
-            elif contract_strength >= 110:  # 양호
-                momentum_score += 5
-            elif contract_strength >= 100:  # 보통
-                momentum_score += 3
-            elif contract_strength >= 90:  # 약함
-                momentum_score += 1
             
             # 시장 단계별 보정
             if market_phase == 'opening':

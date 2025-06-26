@@ -150,7 +150,8 @@ class TradingConditionAnalyzer:
                 realtime_data=realtime_data,
                 market_phase=market_phase,
                 strategy_config=self.strategy_config,
-                risk_config=self.risk_config
+                risk_config=self.risk_config,
+                performance_config=self.performance_config
             )
             
         except Exception as e:

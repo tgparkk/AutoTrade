@@ -170,16 +170,38 @@ class RealTimeMonitor:
     
     @property
     def orders_executed(self) -> int:
-        """실행된 주문 수"""
+        """총 주문 체결 수 (매수+매도)"""
         with self._stats_lock:
             return self._buy_orders_executed + self._sell_orders_executed
-    
+
     @orders_executed.setter
     def orders_executed(self, value: int):
-        """실행된 주문 수 설정"""
+        """총 주문 체결 수 초기화용 (매수 실행 수만 설정, 매도는 0으로 리셋)"""
         with self._stats_lock:
             self._buy_orders_executed = value
             self._sell_orders_executed = 0
+    
+    @property
+    def buy_orders_executed(self) -> int:
+        """매수 주문 체결 수"""
+        with self._stats_lock:
+            return self._buy_orders_executed
+
+    @buy_orders_executed.setter
+    def buy_orders_executed(self, value: int):
+        with self._stats_lock:
+            self._buy_orders_executed = value
+
+    @property
+    def sell_orders_executed(self) -> int:
+        """매도 주문 체결 수"""
+        with self._stats_lock:
+            return self._sell_orders_executed
+
+    @sell_orders_executed.setter
+    def sell_orders_executed(self, value: int):
+        with self._stats_lock:
+            self._sell_orders_executed = value
     
     def is_market_open(self) -> bool:
         """시장 개장 여부 확인

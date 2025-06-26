@@ -314,6 +314,16 @@ class TradeManager:
         try:
             self.is_running = True
             
+            # 🚀 KIS API 인증 선행 (rank 조회 등 사전 요청 오류 방지)
+            try:
+                from api.kis_auth import auth as kis_auth
+                if kis_auth():
+                    logger.info("✅ KIS API 인증 완료 (start_async_system)")
+                else:
+                    logger.error("❌ KIS API 인증 실패 - 이후 API 호출 오류 가능")
+            except Exception as auth_err:
+                logger.error(f"❌ KIS API 인증 호출 오류: {auth_err}")
+            
             # 1. 텔레그램 봇을 별도 스레드에서 시작 (주식 로직과 완전 분리)
             logger.info(f"🔍 텔레그램 봇 체크: self.telegram_bot = {self.telegram_bot}")
             if self.telegram_bot:
@@ -407,7 +417,7 @@ class TradeManager:
         logger.info("📅 주기적 시장 스캔 및 매매 루프 시작")
         
         # 1. 테스트용 초기 종목 분석 (한 번만)
-        await self._run_initial_test_scan()
+        #await self._run_initial_test_scan()
         
         # 2. 메인 루프 변수 초기화
         last_scan_date = None
