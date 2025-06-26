@@ -477,7 +477,11 @@ class RealTimeMonitor:
         
         try:
             # 🔥 배치 처리로 락 경합 최소화
-            holding_stocks = self.stock_manager.get_stocks_by_status(StockStatus.BOUGHT)
+            # BOUGHT + PARTIAL_BOUGHT 모두 보유 포지션으로 간주
+            holding_stocks = (
+                self.stock_manager.get_stocks_by_status(StockStatus.BOUGHT)
+                + self.stock_manager.get_stocks_by_status(StockStatus.PARTIAL_BOUGHT)
+            )
             
             # 빈 리스트면 조기 반환
             if not holding_stocks:

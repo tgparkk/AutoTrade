@@ -92,7 +92,7 @@ class OrderRecoveryManager:
             for stock_code, status in self.stock_manager.trading_status.items():
                 trade_info = self.stock_manager.trade_info.get(stock_code, {})
                 
-                if status == StockStatus.BUY_ORDERED:
+                if status in [StockStatus.BUY_ORDERED, StockStatus.PARTIAL_BOUGHT]:
                     order_time = trade_info.get('order_time')
                     if order_time and self._is_order_stuck(current_time, order_time):
                         stuck_orders.append({
@@ -104,7 +104,7 @@ class OrderRecoveryManager:
                             'trade_info': trade_info.copy()
                         })
                 
-                elif status == StockStatus.SELL_ORDERED:
+                elif status in [StockStatus.SELL_ORDERED, StockStatus.PARTIAL_SOLD]:
                     sell_order_time = trade_info.get('sell_order_time')
                     if sell_order_time and self._is_order_stuck(current_time, sell_order_time):
                         stuck_orders.append({
