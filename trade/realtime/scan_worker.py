@@ -10,19 +10,28 @@ import threading
 import time
 import queue
 from datetime import time as dt_time
-from typing import Any, Optional, Tuple, List
+from typing import Any, Optional, Tuple, List, TYPE_CHECKING
 
 from utils.korean_time import now_kst
 from utils.logger import setup_logger
 
+# 순환 참조 방지를 위한 타입 힌트 전용 import
+if TYPE_CHECKING:
+    from trade.realtime_monitor import RealTimeMonitor
 
 logger = setup_logger(__name__)
 
 
 class IntradayScanWorker:
-    def __init__(self, monitor: "Any"):
-        # monitor: RealTimeMonitor – 순환 참조 회피 위해 Any 사용
-        self.monitor = monitor
+    def __init__(self, monitor: "RealTimeMonitor"):
+        """IntradayScanWorker 초기화
+
+        Parameters
+        ----------
+        monitor : RealTimeMonitor
+            RealTimeMonitor 인스턴스 (순환 import 방지를 위해 TYPE_CHECKING 사용)
+        """
+        self.monitor: "RealTimeMonitor" = monitor
 
         # 내부 상태
         self._market_scanner_instance = None
