@@ -12,7 +12,7 @@ from loguru import logger
 from utils.korean_time import now_kst, now_kst_timestamp, now_kst_str, now_kst_time_str
 
 # 기본 설정값
-DEFAULT_LOG_LEVEL = 'DEBUG'
+DEFAULT_LOG_LEVEL = 'INFO'
 DEFAULT_RETENTION_DAYS = 30
 
 class LoggerSetup:

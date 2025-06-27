@@ -88,6 +88,7 @@ class MarketScanner:
         self.config_loader = get_trading_config_loader()
         self.strategy_config = self.config_loader.load_trading_strategy_config()
         self.performance_config = self.config_loader.load_performance_config()
+        self.daytrading_config = self.config_loader.load_daytrading_config()
         
         # 스크리닝 기준 (장전 스캔용)
         self.volume_increase_threshold = self.strategy_config.get('volume_increase_threshold', 2.0)
@@ -874,51 +875,50 @@ class MarketScanner:
         except Exception as e:
             logger.debug(f"📊 {stock_code} 시간외 단일가 API 실패: {e}")
         
-        # 점수 계산 (가중치 최적화) - 실전 트레이딩 기준 조정
-        volume_score = min(fundamentals['volume_increase_rate'] * 10, 22)  # 최대 22점 (22%)
-        technical_score = (fundamentals['rsi'] / 100) * 18  # 최대 18점 (18%)
-        pattern_score = patterns['pattern_score']  # 최대 18점 (18%)
-        ma_score = 15 if fundamentals['ma_alignment'] else 0  # 15점 (15%) - 정배열 중요
-        momentum_score = min(fundamentals['price_change_rate'] * 100, 8)  # 최대 8점 (8%)
+        # 점수 계산 (technical_indicators.py 위임)
+        from utils.technical_indicators import calculate_daytrading_score
         
-        # 🆕 이격도 점수 추가 (최대 15점) - 매수 타이밍에서 가장 중요한 지표
-        divergence_score = 0
-        if divergence_signal:
-            signal_type = divergence_signal.get('signal', 'HOLD')
-            base_score = divergence_signal.get('score', 0)
-            
-            if signal_type == 'BUY':
-                divergence_score = min(base_score * 0.6, 15)  # 과매도 상황에서 최고 점수
-            elif signal_type == 'MOMENTUM':
-                divergence_score = min(base_score * 0.9, 12)  # 상승 모멘텀에서 좋은 점수
-            elif signal_type == 'OVERHEATED':
-                divergence_score = max(base_score, -8)        # 과열 구간에서 강한 감점
-            else:
-                divergence_score = 2  # HOLD도 중립적 가산점 (이격도 정상 = 안정적)
+        # 시간외 데이터 준비
+        preopen_data = {}
+        if preopen_score != 0:  # 시간외 데이터가 있는 경우
+            try:
+                # 갭 비율 추출
+                from api.kis_preopen_api import get_preopen_overtime_price
+                pre_df = get_preopen_overtime_price(stock_code)
+                if pre_df is not None and not pre_df.empty:
+                    row = pre_df.iloc[0]
+                    after_price = float(row.get('ovtm_untp_prpr', 0))
+                    after_volume = float(row.get('ovtm_untp_vol', 0))
+                    
+                    data_list = _convert_to_dict_list(ohlcv_data)
+                    yesterday_close = float(data_list[0].get('stck_clpr', 0)) if data_list else 0
+                    
+                    if after_price > 0 and yesterday_close > 0:
+                        gap_rate = (after_price - yesterday_close) / yesterday_close * 100
+                        preopen_data = {
+                            'gap_rate': gap_rate,
+                            'trading_value': after_price * after_volume
+                        }
+            except:
+                pass
         
-        total_score = (volume_score + technical_score + pattern_score + ma_score +
-                       momentum_score + divergence_score + preopen_score)
-        
-        # 🆕 유동성 점수 가산
+        # 유동성 점수 추가
         try:
             liq_score = self.stock_manager.get_liquidity_score(stock_code)
         except AttributeError:
             liq_score = 0.0
-        liquidity_weight = self.performance_config.get('liquidity_weight', 1.0)
-        total_score += liq_score * liquidity_weight
+        fundamentals['liquidity_score'] = liq_score
         
-        # 🆕 디버깅 로그에 이격도 점수 추가
-        divergence_info = ""
-        if divergence_signal and divergence_analysis:
-            divergences = divergence_analysis.get('divergences', {})
-            sma_20_div = divergences.get('sma_20', 0)
-            signal_type = divergence_signal.get('signal', 'HOLD')
-            divergence_info = f"이격도({divergence_score:.1f}, 20일선:{sma_20_div:.1f}%, {signal_type}) + "
+        # 데이트레이딩 최적화 점수 계산
+        total_score, score_detail = calculate_daytrading_score(
+            fundamentals=fundamentals,
+            patterns=patterns,
+            divergence_signal=divergence_signal or {},  # None일 경우 빈 dict로 처리
+            preopen_data=preopen_data,
+            config=self.daytrading_config
+        )
         
-        logger.debug(
-            f"📊 {stock_code} 점수 계산 완료: 거래량({volume_score:.1f}) + 기술적({technical_score:.1f}) + "
-            f"패턴({pattern_score:.1f}) + MA({ma_score:.1f}) + 모멘텀({momentum_score:.1f}) + "
-            f"이격도({divergence_score:+.1f}) + 시간외({preopen_score:+}) = {total_score:.1f}")
+        logger.debug(f"📊 {stock_code} {score_detail}")
         
         return min(total_score, 100)  # 최대 100점
     

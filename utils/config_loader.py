@@ -306,23 +306,23 @@ class TradingConfigLoader:
             'high_volatility_position_ratio': self.get_float('high_volatility_position_ratio', section, 0.3),
 
             # 🆕 데이트레이딩 특화 최소 모멘텀/점수 설정
-            'min_momentum_opening': self.get_int('min_momentum_opening', section, 20),
-            'min_momentum_preclose': self.get_int('min_momentum_preclose', section, 25),
-            'min_momentum_normal': self.get_int('min_momentum_normal', section, 15),
+            'min_momentum_opening': self.get_int('min_momentum_opening', section, 12),
+            'min_momentum_preclose': self.get_int('min_momentum_preclose', section, 15),
+            'min_momentum_normal': self.get_int('min_momentum_normal', section, 8),
 
             # 🆕 시장 단계별 총점 기준치
-            'buy_score_opening_threshold': self.get_int('buy_score_opening_threshold', section, 70),
-            'buy_score_preclose_threshold': self.get_int('buy_score_preclose_threshold', section, 75),
-            'buy_score_normal_threshold': self.get_int('buy_score_normal_threshold', section, 60),
+            'buy_score_opening_threshold': self.get_int('buy_score_opening_threshold', section, 45),
+            'buy_score_preclose_threshold': self.get_int('buy_score_preclose_threshold', section, 50),
+            'buy_score_normal_threshold': self.get_int('buy_score_normal_threshold', section, 40),
 
             # 🆕 시장 단계별 추가 배수 / 패턴 점수 기준
             'opening_buy_ratio_multiplier': self.get_float('opening_buy_ratio_multiplier', section, 1.1),
             'preclose_buy_ratio_multiplier': self.get_float('preclose_buy_ratio_multiplier', section, 1.2),
-            'opening_pattern_score_threshold': self.get_float('opening_pattern_score_threshold', section, 75.0),
-            'normal_pattern_score_threshold': self.get_float('normal_pattern_score_threshold', section, 70.0),
+            'opening_pattern_score_threshold': self.get_float('opening_pattern_score_threshold', section, 55.0),
+            'normal_pattern_score_threshold': self.get_float('normal_pattern_score_threshold', section, 50.0),
 
             # 체결강도/쿨다운 신규
-            'min_contract_strength_for_buy': self.get_float('min_contract_strength_for_buy', section, 120.0),
+            'min_contract_strength_for_buy': self.get_float('min_contract_strength_for_buy', section, 110.0),
             'min_holding_minutes_before_sell': self.get_int('min_holding_minutes_before_sell', section, 1),
         }
         
@@ -341,6 +341,54 @@ class TradingConfigLoader:
         logger.info("성능 설정 로드 완료")
         return performance_config
     
+    def load_daytrading_config(self) -> Dict:
+        """
+        데이트레이딩 설정 로드
+        
+        Returns:
+            데이트레이딩 설정 딕셔너리
+        """
+        section = 'DAYTRADING'
+        daytrading_config = {
+            # 종합 점수 가중치
+            'daytrading_volume_weight': self.get_int('VOLUME_WEIGHT', section, 28),
+            'daytrading_momentum_weight': self.get_int('MOMENTUM_WEIGHT', section, 18),
+            'daytrading_divergence_weight': self.get_int('DIVERGENCE_WEIGHT', section, 15),
+            'daytrading_pattern_weight': self.get_int('PATTERN_WEIGHT', section, 14),
+            'daytrading_ma_weight': self.get_int('MA_WEIGHT', section, 15),
+            'daytrading_technical_weight': self.get_int('TECHNICAL_WEIGHT', section, 10),
+            
+            # 시간외 갭 점수 체계
+            'daytrading_gap_optimal_min': self.get_float('GAP_OPTIMAL_MIN', section, 1.0),
+            'daytrading_gap_optimal_max': self.get_float('GAP_OPTIMAL_MAX', section, 3.0),
+            'daytrading_gap_acceptable_max': self.get_float('GAP_ACCEPTABLE_MAX', section, 5.0),
+            'daytrading_gap_danger_threshold': self.get_float('GAP_DANGER_THRESHOLD', section, 7.0),
+            
+            # RSI 최적 구간
+            'daytrading_rsi_optimal_min': self.get_int('RSI_OPTIMAL_MIN', section, 45),
+            'daytrading_rsi_optimal_max': self.get_int('RSI_OPTIMAL_MAX', section, 70),
+            'daytrading_rsi_momentum_min': self.get_int('RSI_MOMENTUM_MIN', section, 50),
+            
+            # 모멘텀 구간별 점수
+            'daytrading_momentum_tier1_min': self.get_float('MOMENTUM_TIER1_MIN', section, 0.3),
+            'daytrading_momentum_tier2_min': self.get_float('MOMENTUM_TIER2_MIN', section, 1.0),
+            'daytrading_momentum_tier3_min': self.get_float('MOMENTUM_TIER3_MIN', section, 2.5),
+            'daytrading_momentum_danger_max': self.get_float('MOMENTUM_DANGER_MAX', section, 8.0),
+            
+            # 거래량 구간별 점수
+            'daytrading_volume_tier1_min': self.get_float('VOLUME_TIER1_MIN', section, 1.5),
+            'daytrading_volume_tier2_min': self.get_float('VOLUME_TIER2_MIN', section, 2.0),
+            'daytrading_volume_tier3_min': self.get_float('VOLUME_TIER3_MIN', section, 2.5),
+            'daytrading_volume_tier4_min': self.get_float('VOLUME_TIER4_MIN', section, 3.0),
+            
+            # 진입 모드 설정
+            'daytrading_aggressive_mode': self.get_bool('AGGRESSIVE_MODE', section, False),
+            'duplicate_buy_cooldown_seconds': self.get_int('DUPLICATE_BUY_COOLDOWN', section, 10),
+        }
+        
+        logger.info("데이트레이딩 설정 로드 완료")
+        return daytrading_config
+    
     def load_all_configs(self) -> Dict:
         """
         모든 거래 설정을 통합하여 반환
@@ -354,7 +402,9 @@ class TradingConfigLoader:
             'market_schedule': self.load_market_schedule_config(),
             'candle_pattern': self.load_candle_pattern_config(),
             'technical_indicators': self.load_technical_indicators_config(),
-            'notification': self.load_notification_config()
+            'notification': self.load_notification_config(),
+            'performance': self.load_performance_config(),
+            'daytrading': self.load_daytrading_config()
         }
 
 # 이전 버전과의 호환성을 위한 별칭

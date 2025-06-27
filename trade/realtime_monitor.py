@@ -64,6 +64,7 @@ class RealTimeMonitor:
         self.config_loader = get_trading_config_loader()
         self.strategy_config = self.config_loader.load_trading_strategy_config()
         self.performance_config = self.config_loader.load_performance_config()  # 🆕 성능 설정 추가
+        self.daytrading_config = self.config_loader.load_daytrading_config()  # 🆕 데이트레이딩 설정 추가
         self.market_config = self.config_loader.load_market_schedule_config()
         self.risk_config = self.config_loader.load_risk_management_config()
         
@@ -127,7 +128,7 @@ class RealTimeMonitor:
         
         # 🆕 중복 매수 쿨다운 관리 (Expectancy 개선)
         self._recent_buy_times: Dict[str, datetime] = {}
-        self.duplicate_buy_cooldown = self.performance_config.get('duplicate_buy_cooldown_seconds', 10)
+        self.duplicate_buy_cooldown = self.daytrading_config.get('duplicate_buy_cooldown_seconds', 10)
         
         # 🆕 BuyProcessor 초기화 (매수 조건/주문 위임)
         from trade.realtime.buy_processor import BuyProcessor
@@ -443,7 +444,7 @@ class RealTimeMonitor:
                     continue
             
             # 🆕 데이트레이딩 모드 확인 (빠른 진입 vs 안전한 진입)
-            daytrading_mode = self.performance_config.get('daytrading_aggressive_mode', False)
+            daytrading_mode = self.daytrading_config.get('daytrading_aggressive_mode', False)
             
             # 🆕 매수 조건 분석 및 주문 실행 (BuyProcessor 위임 + 빠른모드 유지)
             for stock in ready_stocks:
@@ -733,10 +734,6 @@ class RealTimeMonitor:
         """
         # TradingConditionAnalyzer에 위임
         return self.condition_analyzer.calculate_buy_quantity(stock)
-    
-    def monitor_cycle_legacy(self):
-        """MonitorCore.run_cycle 로 위임 (기존 호환성 유지)"""
-        return self.core.run_cycle()
     
     def _log_performance_metrics(self):
         """성능 지표 로깅 (웹소켓 기반)"""
