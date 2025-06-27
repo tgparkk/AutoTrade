@@ -18,6 +18,8 @@ __all__ = [
     "calculate_sma",
     "calculate_divergence_rate",
     "check_ma_alignment",
+    "calculate_rsi",
+    "calculate_macd_signal_simple",
 ]
 
 
@@ -409,3 +411,73 @@ def check_ma_alignment(closes: list[float]) -> bool:
 
     current_price = closes[0]
     return current_price > ma5 > ma10 > ma20
+
+
+# -------------------------------------------------
+# Additional light-weight indicator utilities
+# -------------------------------------------------
+
+
+def calculate_rsi(closes: list[float], period: int = 14) -> float:
+    """RSI 계산 (단순 Python 구현)
+
+    Parameters
+    ----------
+    closes : list[float]
+        종가 배열 (index 0 = 최신값이거나 상관없음, 순서 무관)
+    period : int, default 14
+        RSI 기간
+
+    Returns
+    -------
+    float
+        RSI 값 (0~100). 데이터 부족 시 50 반환.
+    """
+    if len(closes) < period + 1:
+        return 50.0
+
+    gains: list[float] = []
+    losses: list[float] = []
+    for i in range(1, period + 1):
+        change = closes[i - 1] - closes[i]
+        if change > 0:
+            gains.append(change)
+            losses.append(0)
+        else:
+            gains.append(0)
+            losses.append(abs(change))
+
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+
+    if avg_loss == 0:
+        return 100.0
+
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+
+def calculate_macd_signal_simple(closes: list[float]) -> str:
+    """MACD 신호 간단 계산
+
+    EMA 근사를 위해 단순 평균을 사용(12/26) – 속도 우선.
+
+    Returns
+    -------
+    str
+        'positive' | 'negative' | 'neutral'
+    """
+    if len(closes) < 26:
+        return "neutral"
+
+    ema12 = sum(closes[:12]) / 12
+    ema26 = sum(closes[:26]) / 26
+    macd_line = ema12 - ema26
+
+    if macd_line > 0:
+        return "positive"
+    elif macd_line < 0:
+        return "negative"
+    else:
+        return "neutral"

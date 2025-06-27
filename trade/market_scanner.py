@@ -289,42 +289,9 @@ class MarketScanner:
             return None
     
     def _calculate_rsi(self, closes: List[float]) -> float:
-        """RSI 계산
-        
-        Args:
-            closes: 종가 리스트
-            
-        Returns:
-            RSI 값 (0-100)
-        """
-        if len(closes) < 14:
-            return 50.0  # 기본값
-        
-        gains = []
-        losses = []
-        
-        for i in range(1, len(closes)):
-            change = closes[i] - closes[i-1]
-            if change > 0:
-                gains.append(change)
-                losses.append(0)
-            else:
-                gains.append(0)
-                losses.append(abs(change))
-        
-        if len(gains) == 0:
-            return 50.0
-        
-        avg_gain = sum(gains) / len(gains)
-        avg_loss = sum(losses) / len(losses)
-        
-        if avg_loss == 0:
-            return 100.0
-        
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-        
-        return rsi
+        """(Deprecated) utils.calculate_rsi 래퍼"""
+        from utils.technical_indicators import calculate_rsi
+        return calculate_rsi(closes)
     
     def _check_ma_alignment(self, ohlcv_data: List) -> bool:
         """(Deprecated) utils.technical_indicators.check_ma_alignment 래퍼"""
@@ -340,36 +307,15 @@ class MarketScanner:
         return check_ma_alignment(closes)
     
     def _calculate_macd_signal(self, ohlcv_data: List) -> str:
-        """MACD 신호 계산 (단순화)
-        
-        Args:
-            ohlcv_data: OHLCV 데이터
-            
-        Returns:
-            MACD 신호 ('positive', 'negative', 'neutral')
-        """
+        """(Deprecated) utils.calculate_macd_signal_simple 래퍼"""
         if _get_data_length(ohlcv_data) < 26:
             return 'neutral'
-        
-        # DataFrame을 딕셔너리 리스트로 변환
         data_list = _convert_to_dict_list(ohlcv_data)
         if not data_list:
             return 'neutral'
-        
+        from utils.technical_indicators import calculate_macd_signal_simple
         closes = [float(day.get('stck_clpr', 0)) for day in data_list[:26]]
-        
-        # 단순 EMA 근사
-        ema12 = sum(closes[:12]) / 12
-        ema26 = sum(closes) / 26
-        
-        macd_line = ema12 - ema26
-        
-        if macd_line > 0:
-            return 'positive'
-        elif macd_line < 0:
-            return 'negative'
-        else:
-            return 'neutral'
+        return calculate_macd_signal_simple(closes)
     
     # ===== 이격도 계산 메서드 섹션 =====
     
