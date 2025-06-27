@@ -899,6 +899,14 @@ class MarketScanner:
         total_score = (volume_score + technical_score + pattern_score + ma_score +
                        momentum_score + divergence_score + preopen_score)
         
+        # 🆕 유동성 점수 가산
+        try:
+            liq_score = self.stock_manager.get_liquidity_score(stock_code)
+        except AttributeError:
+            liq_score = 0.0
+        liquidity_weight = self.performance_config.get('liquidity_weight', 1.0)
+        total_score += liq_score * liquidity_weight
+        
         # 🆕 디버깅 로그에 이격도 점수 추가
         divergence_info = ""
         if divergence_signal and divergence_analysis:
@@ -1390,8 +1398,15 @@ class MarketScanner:
                         # 타이밍 점수 (항상 적용)
                         timing_score, timing_reason = self._calculate_daytrading_timing_score()
                         
-                        # 종합 점수 계산
+                        # 종합 점수 계산 (유동성 포함)
                         total_score = data['score'] + orderbook_score + timing_score
+                        
+                        try:
+                            liq_score = self.stock_manager.get_liquidity_score(code)
+                        except AttributeError:
+                            liq_score = 0.0
+                        liq_weight = self.performance_config.get('liquidity_weight', 1.0)
+                        total_score += liq_score * liq_weight
                         
                         # 개선된 사유 정리
                         enhanced_reasons = data['reasons'][:]

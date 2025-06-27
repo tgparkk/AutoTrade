@@ -22,6 +22,11 @@ from models.stock import Stock, StockStatus, ReferenceData, RealtimeData
 from utils.korean_time import now_kst
 from utils.logger import setup_logger
 from utils import get_trading_config_loader
+# 🆕 유동성 추적기
+try:
+    from websocket.liquidity_tracker import liquidity_tracker
+except ImportError:
+    liquidity_tracker = None  # 테스트 환경 대비
 
 # 데이터베이스는 메서드 내부에서 import (경로 문제 해결)
 
@@ -1069,6 +1074,13 @@ class StockManager:
             # 캐시 무효화 (마지막에 수행)
             self._invalidate_cache(stock_code)
             
+            # 🆕 유동성 추적기 기록 (체결 데이터)
+            if liquidity_tracker is not None:
+                try:
+                    liquidity_tracker.record(stock_code, 'contract', contract_volume)
+                except Exception:
+                    pass
+            
         except Exception as e:
             logger.error(f"실시간 가격 처리 오류 [{stock_code}]: {e}")
             logger.debug(f"처리 실패 데이터: {data}")
@@ -1121,6 +1133,13 @@ class StockManager:
             
             # 캐시 무효화
             self._invalidate_cache(stock_code)
+            
+            # 🆕 유동성 추적기 기록 (호가 데이터)
+            if liquidity_tracker is not None:
+                try:
+                    liquidity_tracker.record(stock_code, 'bidask', 0)
+                except Exception:
+                    pass
             
         except Exception as e:
             logger.error(f"실시간 호가 처리 오류 [{stock_code}]: {e}")
@@ -1295,6 +1314,15 @@ class StockManager:
                 info['buy_price'] = avg_price  # 최종 평단을 buy_price 로 사용
                 info['execution_time'] = now_kst()
 
+                # 최초 체결 시 주문 시간 정보 보정 (order_time 없으면 현재시각)
+                if 'order_time' not in info or info['order_time'] is None:
+                    info['order_time'] = now_kst()
+                    self.trade_info[stock_code] = info
+                    # Stock 객체에도 반영
+                    stock_obj = self._stock_cache.get(stock_code)
+                    if stock_obj:
+                        stock_obj.order_time = info['order_time']
+
             # ------------------------------
             # 상태 결정
             # ------------------------------
@@ -1373,6 +1401,11 @@ class StockManager:
                 info['avg_exec_price'] = avg_price
                 info['sell_price'] = avg_price
                 info['sell_execution_time'] = now_kst()
+
+            # 🆕 Stock 객체의 보유 수량 동기화 (부분 체결 후 재매도 시 과주문 방지)
+            stock_obj = self._stock_cache.get(stock_code)
+            if stock_obj:
+                stock_obj.buy_quantity = remaining_qty
 
             # 손익 계산 — buy_price 는 평단, buy_quantity 는 총수량로 가정
             buy_price = info.get('buy_price', 0)
@@ -1500,5 +1533,15 @@ class StockManager:
         self.websocket_manager = websocket_manager
         
         logger.info("✅ StockManager 웹소켓 콜백 등록 완료")
+    
+    # === 유동성 점수 조회 ===
+    def get_liquidity_score(self, stock_code: str) -> float:
+        """LiquidityTracker에서 0~10 점수 반환 (없으면 0)"""
+        if liquidity_tracker is None:
+            return 0.0
+        try:
+            return liquidity_tracker.get_score(stock_code)
+        except Exception:
+            return 0.0
     
  

@@ -192,6 +192,20 @@ class TradeDatabase:
                     )
                 """)
                 
+                # 6. 일일 성과 메트릭 테이블 (자동 파라미터 튜닝용)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS metrics_daily (
+                        trade_date DATE PRIMARY KEY,
+                        trades INTEGER,
+                        win_rate REAL,
+                        total_pnl REAL,
+                        avg_pnl REAL,
+                        max_drawdown REAL DEFAULT 0,
+                        params_json TEXT,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
                 # 인덱스 생성
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_pre_market_date ON pre_market_scans(scan_date)")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_pre_market_stock ON pre_market_scans(stock_code)")
@@ -201,6 +215,7 @@ class TradeDatabase:
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_buy_orders_stock ON buy_orders(stock_code)")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_sell_orders_date ON sell_orders(order_date)")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_sell_orders_stock ON sell_orders(stock_code)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_metrics_date ON metrics_daily(trade_date)")
                 
                 conn.commit()
                 logger.info("데이터베이스 테이블 초기화 완료")
@@ -552,7 +567,7 @@ class TradeDatabase:
             order_data = {
                 'stock_code': stock_code,
                 'stock_name': stock_metadata.get('stock_name', ''),
-                'order_time': trade_info.get('buy_order_time', now_kst()),
+                'order_time': trade_info.get('buy_order_time') or now_kst(),
                 'execution_time': now_kst(),  # 실제 체결 시점
                 'order_id': trade_info.get('buy_order_id', ''),
                 'order_orgno': trade_info.get('buy_order_orgno', ''),
@@ -711,7 +726,7 @@ class TradeDatabase:
                 
                 # 기간 설정
                 end_date = now_kst().date()
-                start_date = end_date - datetime.timedelta(days=days)
+                start_date = end_date - timedelta(days=days)
                 
                 # 매도 사유별 성과
                 cursor.execute("""
@@ -832,4 +847,31 @@ class TradeDatabase:
 
     def close(self):
         """데이터베이스 연결 정리"""
-        logger.info("TradeDatabase 정리 완료") 
+        logger.info("TradeDatabase 정리 완료")
+
+    # -----------------------------
+    # 🆕 Daily Metrics 저장/조회
+    # -----------------------------
+    def save_daily_metrics(self, metrics: Dict[str, Any]) -> bool:
+        """일일 성과 메트릭 저장 (trade_date PRIMARY KEY 중복 시 REPLACE)"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT OR REPLACE INTO metrics_daily (
+                        trade_date, trades, win_rate, total_pnl, avg_pnl, max_drawdown, params_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, (
+                    metrics.get('trade_date'),
+                    int(metrics.get('trades', 0)),
+                    float(metrics.get('win_rate', 0.0)),
+                    float(metrics.get('total_pnl', 0.0)),
+                    float(metrics.get('avg_pnl', 0.0)),
+                    float(metrics.get('max_drawdown', 0.0)),
+                    json.dumps(metrics.get('params', {}))
+                ))
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"metrics_daily 저장 실패: {e}")
+            return False 

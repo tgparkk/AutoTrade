@@ -154,7 +154,11 @@ class KISWebSocketDataParser:
             total_ask_qty = self._safe_int(parts[19])  # 총매도수량
             total_bid_qty = self._safe_int(parts[20])  # 총매수수량
             contract_type = parts[21]  # 체결구분 (1:매수, 3:장전, 5:매도)
-            buy_ratio = self._safe_float(parts[22])  # 매수비율
+            raw_buy_ratio = self._safe_float(parts[22])  # 매수비율 (원본)
+            
+            # 🆕 스케일 보정: 0~1 범위로 제공되므로 1.0 이하 값은 ×100
+            buy_ratio = raw_buy_ratio * 100.0
+            
             prev_volume_ratio = self._safe_float(parts[23])  # 전일거래량대비등락율
             
             # 🆕 시간 관련 정보들

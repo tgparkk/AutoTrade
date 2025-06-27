@@ -417,7 +417,7 @@ class TradeManager:
         logger.info("📅 주기적 시장 스캔 및 매매 루프 시작")
         
         # 1. 테스트용 초기 종목 분석 (한 번만)
-        await self._run_initial_test_scan()
+        #await self._run_initial_test_scan()
         
         # 2. 메인 루프 변수 초기화
         last_scan_date = None
@@ -428,12 +428,12 @@ class TradeManager:
                 current_time = now_kst()
                 current_date = current_time.date()
                 
-                # 장시작전 스캔 처리
-                if self._should_run_pre_market() and last_scan_date != current_date:
-                    market_monitoring_active = await self._handle_pre_market_scan(
-                        current_date, market_monitoring_active
-                    )
-                    last_scan_date = current_date
+                #장시작전 스캔 처리
+                # if self._should_run_pre_market() and last_scan_date != current_date:
+                #     market_monitoring_active = await self._handle_pre_market_scan(
+                #         current_date, market_monitoring_active
+                #     )
+                #     last_scan_date = current_date
                 
                 # 장시간 모니터링 처리
                 if self._is_market_hours() and not market_monitoring_active:

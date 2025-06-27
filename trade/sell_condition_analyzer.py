@@ -90,7 +90,7 @@ class SellConditionAnalyzer:
             
             # === 우선순위 4-1: 호가잔량 기반 매도 (신규 추가) ===
             orderbook_sell_reason = SellConditionAnalyzer._check_orderbook_sell_conditions(
-                stock, realtime_data, current_pnl_rate, strategy_config
+                stock, realtime_data, current_pnl_rate, holding_minutes, strategy_config
             )
             if orderbook_sell_reason:
                 return orderbook_sell_reason
@@ -217,7 +217,7 @@ class SellConditionAnalyzer:
         
         # 매수비율 급락
         low_buy_ratio_threshold = strategy_config.get('low_buy_ratio_threshold', 30.0)
-        if buy_ratio <= low_buy_ratio_threshold:
+        if (not within_cooldown) and buy_ratio <= low_buy_ratio_threshold:
             if current_pnl_rate <= 0 or holding_minutes >= 120:
                 return "low_buy_ratio"
         
@@ -281,7 +281,9 @@ class SellConditionAnalyzer:
         else:
             multiplier = strategy_config.get('time_stop_over4hour_multiplier', 0.4)
         
-        return base_stop_loss * multiplier
+        # 현재 current_pnl_rate 는 백분율(%) 단위로 계산되어 있다.
+        # base_stop_loss 는 소수(-0.02) 형태이므로 100 을 곱해 동일한 단위(%)로 변환한다.
+        return base_stop_loss * multiplier * 100
     
     @staticmethod
     def _analyze_rapid_decline_sell_signal(stock: Stock, realtime_data: Dict, current_pnl_rate: float,
@@ -316,7 +318,7 @@ class SellConditionAnalyzer:
     
     @staticmethod
     def _check_orderbook_sell_conditions(stock: Stock, realtime_data: Dict, 
-                                       current_pnl_rate: float, strategy_config: Dict) -> Optional[str]:
+                                       current_pnl_rate: float, holding_minutes: float, strategy_config: Dict) -> Optional[str]:
         """호가잔량 기반 매도 조건 확인 (신규 추가)"""
         try:
             # 호가잔량 데이터 추출
@@ -324,6 +326,11 @@ class SellConditionAnalyzer:
             total_bid_qty = getattr(stock.realtime_data, 'total_bid_qty', 0)
             
             if total_ask_qty <= 0 or total_bid_qty <= 0:
+                return None
+            
+            # 최소 보유시간 검사 (쿨다운)
+            min_holding_for_orderbook = strategy_config.get('min_holding_for_orderbook', 1)  # 기본 1분
+            if holding_minutes < min_holding_for_orderbook:
                 return None
             
             # 1. 매도호가 급증 (매도압력 3배 이상)

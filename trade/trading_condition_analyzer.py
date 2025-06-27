@@ -95,7 +95,7 @@ class TradingConditionAnalyzer:
     
     def analyze_buy_conditions(self, stock: Stock, realtime_data: Dict, 
                               market_phase: Optional[str] = None) -> bool:
-        """매수 조건 분석 (BuyConditionAnalyzer 위임)
+        """매수 조건 분석 (TradingConditionAnalyzer 위임)
         
         Args:
             stock: 주식 객체
@@ -109,6 +109,10 @@ class TradingConditionAnalyzer:
             # 시장 단계 결정
             if market_phase is None:
                 market_phase = self.get_market_phase()
+            
+            # 0️⃣ 선행 필터: 호가/체결강도/매수비율 기반 빠른 거르기
+            if not self._pre_buy_filters(stock, realtime_data):
+                return False
             
             # BuyConditionAnalyzer에 위임 (Static 메서드 사용)
             from .buy_condition_analyzer import BuyConditionAnalyzer
@@ -360,4 +364,69 @@ class TradingConditionAnalyzer:
         except Exception as e:
             logger.error(f"매도 조건 권장사항 생성 오류: {e}")
         
-        return recommendations 
+        return recommendations
+
+    # ------------------------------------------------------------------
+    # 🆕  선행 매수 필터 (호가 잔량·매수비율·체결강도)
+    # ------------------------------------------------------------------
+    def _pre_buy_filters(self, stock: Stock, realtime_data: Dict) -> bool:
+        """호가/체결 정보 기반 1차 매수 필터링"""
+        try:
+            cfg = self.performance_config  # 가독성 단축
+
+            # 호가 잔량 (default 0)
+            bid_qty = getattr(stock.realtime_data, 'total_bid_qty', 0)
+            ask_qty = getattr(stock.realtime_data, 'total_ask_qty', 0)
+
+            if bid_qty > 0 and ask_qty > 0:
+                ratio_ba = bid_qty / ask_qty
+                min_ba = cfg.get('min_bid_ask_ratio_for_buy', 1.2)
+                max_ab = cfg.get('max_ask_bid_ratio_for_buy', 2.5)
+
+                # 매수호가 열세( <1.2 )
+                if ratio_ba < min_ba:
+                    logger.debug(f"매수호가 열세({ratio_ba*100:.1f}%)로 매수 제외: {stock.stock_code}")
+                    return False
+
+                # 매도호가 과다( ask/bid > max_ab )
+                ratio_ab = ask_qty / bid_qty
+                if ratio_ab >= max_ab:
+                    logger.debug(f"매도호가 과다({ratio_ab*100:.1f}%)로 매수 제외: {stock.stock_code}")
+                    return False
+
+            # 매수비율 / 체결강도
+            buy_ratio = getattr(stock.realtime_data, 'buy_ratio', 50.0)
+            min_buy_ratio = cfg.get('min_buy_ratio_for_buy', 40.0)
+            if buy_ratio < min_buy_ratio:
+                logger.debug(f"매수비율 낮음({buy_ratio:.1f}%)로 매수 제외: {stock.stock_code}")
+                return False
+
+            strength = getattr(stock.realtime_data, 'contract_strength', 100.0)
+            min_strength = cfg.get('min_contract_strength_for_buy', 110.0)
+            if strength < min_strength:
+                logger.debug(f"체결강도 약함({strength:.1f})로 매수 제외: {stock.stock_code}")
+                return False
+
+            # 일일 등락률 필터 – limit-up 근접 종목 제외
+            price_change_rate = getattr(stock.realtime_data, 'price_change_rate', 0.0)
+            max_pct = cfg.get('max_price_change_rate_for_buy', 15.0)
+            if price_change_rate >= max_pct:
+                logger.debug(f"등락률 높음({price_change_rate:.1f}%)로 매수 제외: {stock.stock_code}")
+                return False
+
+            # 🆕 유동성 점수 필터
+            try:
+                liq_score = self.stock_manager.get_liquidity_score(stock.stock_code)
+            except AttributeError:
+                liq_score = 0.0
+
+            min_liq = cfg.get('min_liquidity_score_for_buy', 3.0)
+            if liq_score < min_liq:
+                logger.debug(f"유동성 낮음({liq_score:.1f})로 매수 제외: {stock.stock_code}")
+                return False
+
+            return True
+
+        except Exception as e:
+            logger.error(f"선행 매수 필터 오류 {stock.stock_code}: {e}")
+            return True  # 오류 시 필터 통과시켜 길목 차단 방지 

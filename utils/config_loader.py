@@ -326,6 +326,18 @@ class TradingConfigLoader:
             'min_holding_minutes_before_sell': self.get_int('min_holding_minutes_before_sell', section, 1),
         }
         
+        # 🆕 자동 파라미터 튜닝 결과 오버레이
+        auto_params_path = "config/auto_params.json"
+        if os.path.exists(auto_params_path):
+            try:
+                import json
+                with open(auto_params_path, 'r', encoding='utf-8') as f:
+                    auto_params = json.load(f)
+                performance_config.update(auto_params)
+                logger.info("auto_params.json 적용 완료 (자동 튜닝 파라미터)")
+            except Exception as e:
+                logger.warning(f"auto_params.json 로드 실패: {e}")
+        
         logger.info("성능 설정 로드 완료")
         return performance_config
     
