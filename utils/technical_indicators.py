@@ -20,6 +20,9 @@ __all__ = [
     "check_ma_alignment",
     "calculate_rsi",
     "calculate_macd_signal_simple",
+    "detect_candle_patterns",
+    "analyze_candle_patterns",
+    "divergence_analysis",
 ]
 
 
@@ -481,3 +484,146 @@ def calculate_macd_signal_simple(closes: list[float]) -> str:
         return "negative"
     else:
         return "neutral"
+
+
+# -------------------------------------------------
+# Candle pattern & divergence utilities (from MarketScanner)
+# -------------------------------------------------
+
+
+def detect_candle_patterns(
+    open_p: float,
+    high_p: float,
+    low_p: float,
+    close_p: float,
+) -> dict[str, float]:
+    """단일 봉에서 캔들 패턴 탐지 후 점수 매핑
+
+    Parameters
+    ----------
+    open_p, high_p, low_p, close_p : float
+        시고저종 가격 (원화)
+
+    Returns
+    -------
+    dict[str, float]
+        패턴명 → 신뢰도(0~1)
+    """
+    total_range = high_p - low_p
+    if total_range <= 0:
+        return {}
+
+    body_size = abs(close_p - open_p)
+    upper_shadow = high_p - max(open_p, close_p)
+    lower_shadow = min(open_p, close_p) - low_p
+
+    body_ratio = body_size / total_range
+    upper_ratio = upper_shadow / total_range
+    lower_ratio = lower_shadow / total_range
+
+    patterns: dict[str, float] = {}
+
+    # Hammer
+    if lower_ratio > 0.5 and upper_ratio < 0.1 and body_ratio < 0.3:
+        patterns["hammer"] = 0.8
+
+    # Bullish engulfing (simplified)
+    if close_p > open_p and body_ratio > 0.6:
+        patterns["bullish_engulfing"] = 0.9
+
+    # Doji / Dragonfly Doji
+    if body_ratio < 0.1:
+        if lower_ratio > 0.3:
+            patterns["dragonfly_doji"] = 0.7
+        else:
+            patterns["doji"] = 0.5
+
+    # Inverted hammer
+    if upper_ratio > 0.5 and lower_ratio < 0.1 and body_ratio < 0.3:
+        patterns["inverted_hammer"] = 0.65
+
+    return patterns
+
+
+def analyze_candle_patterns(ohlcv_dicts: list[dict]) -> dict | None:
+    """최근 5개 일봉 데이터를 분석해 패턴 점수 산출
+
+    Parameters
+    ----------
+    ohlcv_dicts : list[dict]
+        OHLCV 기록 (최신이 index 0)
+    """
+    if len(ohlcv_dicts) < 5:
+        return None
+
+    try:
+        recent5 = ohlcv_dicts[:5]
+
+        detected_patterns: dict[str, float] = {}
+        pattern_scores: dict[str, float] = {}
+
+        reliability = 1.0
+        total_score = 0.0
+
+        for day in recent5:
+            op = float(day.get("stck_oprc", 0))
+            hp = float(day.get("stck_hgpr", 0))
+            lp = float(day.get("stck_lwpr", 0))
+            cp = float(day.get("stck_clpr", 0))
+
+            pats = detect_candle_patterns(op, hp, lp, cp)
+            for k, v in pats.items():
+                detected_patterns[k] = max(detected_patterns.get(k, 0), v)
+
+        # 간단 가중 평균: 패턴별 최고 신뢰도 합
+        for pat, conf in detected_patterns.items():
+            score = conf  # 0~1
+            pattern_scores[pat] = score
+            total_score += score
+
+        reliability = min(total_score / len(detected_patterns), 1.0) if detected_patterns else 0
+        pattern_score = min(total_score * 18, 18)
+
+        return {
+            "detected_patterns": detected_patterns,
+            "pattern_scores": pattern_scores,
+            "total_pattern_score": total_score,
+            "reliability": reliability,
+            "pattern_score": pattern_score,
+        }
+    except Exception:
+        return None
+
+
+def divergence_analysis(prices: list[float]) -> dict | None:
+    """20일 가격 리스트로 SMA·이격도 계산"""
+    if len(prices) < 20:
+        return None
+
+    current_price = prices[0]
+    if current_price <= 0:
+        return None
+
+    from utils.technical_indicators import calculate_sma, calculate_divergence_rate
+
+    sma5 = calculate_sma(prices, 5)
+    sma10 = calculate_sma(prices, 10)
+    sma20 = calculate_sma(prices, 20)
+
+    divergences: dict[str, float] = {}
+    if sma5 > 0:
+        divergences["sma_5"] = calculate_divergence_rate(current_price, sma5)
+    if sma10 > 0:
+        divergences["sma_10"] = calculate_divergence_rate(current_price, sma10)
+    if sma20 > 0:
+        divergences["sma_20"] = calculate_divergence_rate(current_price, sma20)
+
+    # yesterday change
+    if len(prices) > 1 and prices[1] > 0:
+        divergences["yesterday_change"] = calculate_divergence_rate(current_price, prices[1])
+
+    return {
+        "current_price": current_price,
+        "divergences": divergences,
+        "sma_values": {"sma_5": sma5, "sma_10": sma10, "sma_20": sma20},
+    }

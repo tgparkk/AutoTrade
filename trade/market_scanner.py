@@ -352,37 +352,8 @@ class MarketScanner:
             
             prices = [float(day.get('stck_clpr', 0)) for day in data_list[:20]]
             
-            # 각종 이격도 계산
-            divergences = {}
-            
-            from utils.technical_indicators import calculate_sma, calculate_divergence_rate
-
-            # 5일선 이격도
-            sma_5 = calculate_sma(prices, 5)
-            if sma_5 > 0:
-                divergences['sma_5'] = calculate_divergence_rate(current_price, sma_5)
-            
-            # 10일선 이격도
-            sma_10 = calculate_sma(prices, 10)
-            if sma_10 > 0:
-                divergences['sma_10'] = calculate_divergence_rate(current_price, sma_10)
-            
-            # 20일선 이격도
-            sma_20 = calculate_sma(prices, 20)
-            if sma_20 > 0:
-                divergences['sma_20'] = calculate_divergence_rate(current_price, sma_20)
-            
-            # 전일 대비 변화율
-            if len(data_list) > 1:
-                yesterday_price = float(data_list[1].get('stck_clpr', 0))
-                if yesterday_price > 0:
-                    divergences['yesterday_change'] = self._calculate_divergence_rate(current_price, yesterday_price)
-            
-            return {
-                'current_price': current_price,
-                'divergences': divergences,
-                'sma_values': {'sma_5': sma_5, 'sma_10': sma_10, 'sma_20': sma_20}
-            }
+            from utils.technical_indicators import divergence_analysis
+            return divergence_analysis(prices)
             
         except Exception as e:
             logger.debug(f"이격도 분석 실패 {stock_code}: {e}")
@@ -542,111 +513,10 @@ class MarketScanner:
         }
     
     def _analyze_real_candle_patterns(self, stock_code: str, ohlcv_data: Any) -> Optional[Dict]:
-        """실제 OHLCV 데이터에서 캔들패턴 분석
-        
-        Args:
-            stock_code: 종목코드
-            ohlcv_data: OHLCV 데이터
-            
-        Returns:
-            패턴 분석 결과 또는 None (분석 실패시)
-        """
-        detected_patterns = []
-        pattern_scores = {}
-        
-        try:
-            # DataFrame을 딕셔너리 리스트로 변환
-            data_list = _convert_to_dict_list(ohlcv_data)
-            if not data_list:
-                logger.warning(f"캔들패턴 데이터 변환 실패: {stock_code}")
-                return None
-            
-            # 최근 5일 데이터로 패턴 분석
-            recent_candles = data_list[:5]
-            
-            for i, candle in enumerate(recent_candles):
-                open_price = float(candle.get('stck_oprc', 0))
-                high_price = float(candle.get('stck_hgpr', 0))
-                low_price = float(candle.get('stck_lwpr', 0))
-                close_price = float(candle.get('stck_clpr', 0))
-                
-                # 기본 캔들 분석
-                body_size = abs(close_price - open_price)
-                total_range = high_price - low_price
-                upper_shadow = high_price - max(open_price, close_price)
-                lower_shadow = min(open_price, close_price) - low_price
-                
-                if total_range == 0:
-                    continue
-                
-                # 패턴 감지 로직
-                patterns = self._detect_candle_patterns(
-                    open_price, high_price, low_price, close_price,
-                    body_size, total_range, upper_shadow, lower_shadow
-                )
-                
-                for pattern_name, score in patterns.items():
-                    if pattern_name not in pattern_scores:
-                        detected_patterns.append(pattern_name)
-                        pattern_scores[pattern_name] = score
-                    else:
-                        # 같은 패턴이 여러 날에 나타나면 평균 점수
-                        pattern_scores[pattern_name] = (pattern_scores[pattern_name] + score) / 2
-            
-            total_score = sum(pattern_scores.values())
-            reliability = min(total_score / len(detected_patterns), 1.0) if detected_patterns else 0.0
-            
-            # 패턴 점수는 18점을 상한으로 캡핑 (다수 패턴 중복 시 과대평가 방지)
-            pattern_score = min(total_score * 18, 18)
-            
-            return {
-                'detected_patterns': detected_patterns,
-                'pattern_scores': pattern_scores,
-                'total_pattern_score': total_score,
-                'reliability': reliability,
-                'pattern_score': pattern_score
-            }
-            
-        except Exception as e:
-            logger.error(f"실제 캔들패턴 분석 실패 {stock_code}: {e}")
-            return None
-    
-    def _detect_candle_patterns(self, open_p: float, high_p: float, low_p: float, close_p: float,
-                               body_size: float, total_range: float, upper_shadow: float, lower_shadow: float) -> Dict:
-        """개별 캔들에서 패턴 감지
-        
-        Returns:
-            감지된 패턴과 점수 딕셔너리
-        """
-        patterns = {}
-        
-        if total_range == 0:
-            return patterns
-        
-        body_ratio = body_size / total_range
-        upper_ratio = upper_shadow / total_range
-        lower_ratio = lower_shadow / total_range
-        
-        # 해머 패턴 (긴 아래 그림자, 짧은 위 그림자, 작은 몸통)
-        if (lower_ratio > 0.5 and upper_ratio < 0.1 and body_ratio < 0.3):
-            patterns['hammer'] = 0.8
-        
-        # 상승장악형 (불리시 인걸핑)
-        if close_p > open_p and body_ratio > 0.6:
-            patterns['bullish_engulfing'] = 0.9
-        
-        # 십자형 (도지)
-        if body_ratio < 0.1:
-            if lower_ratio > 0.3:
-                patterns['dragonfly_doji'] = 0.7
-            else:
-                patterns['doji'] = 0.5
-        
-        # 역망치형
-        if (upper_ratio > 0.5 and lower_ratio < 0.1 and body_ratio < 0.3):
-            patterns['inverted_hammer'] = 0.65
-        
-        return patterns
+        """(Deprecated) utils.analyze_candle_patterns 래퍼"""
+        data_list = _convert_to_dict_list(ohlcv_data)
+        from utils.technical_indicators import analyze_candle_patterns
+        return analyze_candle_patterns(data_list)
     
     def calculate_comprehensive_score(self, stock_code: str) -> Optional[float]:
         """종합 점수 계산
