@@ -4,25 +4,28 @@ RealTimeMonitor의 monitor_cycle_legacy 로직을 MonitorCore.run_cycle로 이�
 """
 
 from __future__ import annotations
-from typing import Any, Dict
+from typing import TYPE_CHECKING, Dict
 from utils.logger import setup_logger
+
+if TYPE_CHECKING:
+    from trade.realtime_monitor import RealTimeMonitor
 
 logger = setup_logger(__name__)
 
 class MonitorCore:
     """RealTimeMonitor 의 핵심 모니터링 사이클 처리 담당"""
 
-    def __init__(self, monitor: "Any"):
+    def __init__(self, monitor: "RealTimeMonitor"):
         self.monitor = monitor  # RealTimeMonitor 인스턴스
 
     def run_cycle(self):
         """메인 모니터링 사이클 (기존 monitor_cycle_legacy 로직)"""
         # 🔥 동시 실행 방지 (스레드 안전성 보장)
-        if hasattr(self.monitor, '_cycle_executing') and self.monitor._cycle_executing:
+        if hasattr(self.monitor, '_cycle_executing') and getattr(self.monitor, '_cycle_executing', False):
             logger.debug("⚠️ 이전 monitor_cycle() 아직 실행 중 - 이번 사이클 건너뜀")
             return
         
-        self.monitor._cycle_executing = True
+        setattr(self.monitor, '_cycle_executing', True)
         
         try:
             self.monitor._market_scan_count += 1
@@ -102,7 +105,7 @@ class MonitorCore:
             logger.error(f"모니터링 사이클 오류: {e}")
         finally:
             # 🔥 반드시 실행 플래그 해제 (예외 발생시에도)
-            self.monitor._cycle_executing = False
+            setattr(self.monitor, '_cycle_executing', False)
 
     def loop(self):
         """메인 모니터링 루프 (미구현)"""

@@ -14,12 +14,17 @@ stock_manager, trade_executor, condition_analyzer, config 들을 전달받아
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, Optional, TYPE_CHECKING, Any
 from datetime import datetime
 
 from models.stock import Stock, StockStatus
 from utils.korean_time import now_kst
 from utils.logger import setup_logger
+
+if TYPE_CHECKING:
+    from trade.stock_manager import StockManager
+    from trade.trade_executor import TradeExecutor
+    from trade.trading_condition_analyzer import TradingConditionAnalyzer
 
 logger = setup_logger(__name__)
 
@@ -32,21 +37,21 @@ class BuyProcessor:
     # ------------------------------------------------------------------
     def __init__(
         self,
-        stock_manager,
-        trade_executor,
-        condition_analyzer,
-        performance_config: Dict,
-        risk_config: Dict,
+        stock_manager: "StockManager",
+        trade_executor: "TradeExecutor", 
+        condition_analyzer: "TradingConditionAnalyzer",
+        performance_config: Dict[str, Any],
+        risk_config: Dict[str, Any],
         duplicate_buy_cooldown: int = 10,
     ):
-        self.stock_manager = stock_manager
-        self.trade_executor = trade_executor
-        self.condition_analyzer = condition_analyzer
+        self.stock_manager: "StockManager" = stock_manager
+        self.trade_executor: "TradeExecutor" = trade_executor
+        self.condition_analyzer: "TradingConditionAnalyzer" = condition_analyzer
 
         # 설정
-        self.performance_config = performance_config
-        self.risk_config = risk_config
-        self.duplicate_buy_cooldown = max(1, duplicate_buy_cooldown)
+        self.performance_config: Dict[str, Any] = performance_config
+        self.risk_config: Dict[str, Any] = risk_config
+        self.duplicate_buy_cooldown: int = max(1, duplicate_buy_cooldown)
 
         # 내부 상태
         self._recent_buy_times: Dict[str, datetime] = {}
@@ -57,7 +62,7 @@ class BuyProcessor:
     def analyze_buy_conditions(
         self,
         stock: Stock,
-        realtime_data: Dict,
+        realtime_data: Dict[str, Any],
         market_phase: Optional[str] = None,
     ) -> bool:
         """TradingConditionAnalyzer 래퍼"""
@@ -72,7 +77,7 @@ class BuyProcessor:
     def analyze_and_buy(
         self,
         stock: Stock,
-        realtime_data: Dict,
+        realtime_data: Dict[str, Any],
         current_positions_count: int,
         market_phase: Optional[str] = None,
     ) -> bool:
@@ -146,7 +151,7 @@ class BuyProcessor:
     def _pre_checks(
         self,
         stock: Stock,
-        realtime_data: Dict,
+        realtime_data: Dict[str, Any],
         current_positions_count: int,
     ) -> bool:
         """매수 전 공통 선행 체크"""
