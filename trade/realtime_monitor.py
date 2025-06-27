@@ -143,6 +143,16 @@ class RealTimeMonitor:
         # RealTimeMonitor 와 최근 매수 시각 dict 공유 (기존 로직 호환)
         self.buy_processor._recent_buy_times = self._recent_buy_times
         
+        # 🆕 SellProcessor 초기화
+        from trade.realtime.sell_processor import SellProcessor
+        self.sell_processor = SellProcessor(
+            stock_manager=self.stock_manager,
+            trade_executor=self.trade_executor,
+            condition_analyzer=self.condition_analyzer,
+            performance_config=self.performance_config,
+            risk_config=self.risk_config,
+        )
+
         logger.info("RealTimeMonitor 초기화 완료 (웹소켓 기반 최적화 버전 + 장중추가스캔)")
     
     @property
@@ -700,41 +710,26 @@ class RealTimeMonitor:
                     continue
                 
                 try:
-                    # 매도 조건 확인 (TradingConditionAnalyzer 내부에서 락 최적화됨)
-                    sell_reason = self.analyze_sell_conditions(stock, realtime_data)
-                    
-                    if sell_reason:
-                        result['signaled'] += 1
-                        
-                        # 🔥 원자적 통계 업데이트 (스레드 안전)
+                    # SellProcessor 위임
+                    market_phase = self.get_market_phase()
+                    prev_sig = result['signaled']
+                    success = self.sell_processor.analyze_and_sell(
+                        stock=stock,
+                        realtime_data=realtime_data,
+                        result_dict=result,
+                        market_phase=market_phase,
+                    )
+
+                    if result['signaled'] > prev_sig:
                         with self._stats_lock:
                             self._sell_signals_detected += 1
-                        
-                        # 🔥 매도 주문 실행 (TradeExecutor 내부에서 상태 변경)
-                        success = self.trade_executor.execute_sell_order(
-                            stock=stock,
-                            price=realtime_data['current_price'],
-                            reason=sell_reason
-                        )
-                        
                         if success:
-                            result['ordered'] += 1
-                            
-                            # 🔥 원자적 통계 업데이트 (스레드 안전)
                             with self._stats_lock:
                                 self._sell_orders_executed += 1
-                            
-                            # 중복 알림 방지 제거 (스레드 안전)
-                            signal_key = f"{stock.stock_code}_buy"
-                            self.alert_sent.discard(signal_key)
-                            
-                            logger.info(f"📝 매도 주문 접수: {stock.stock_code} "
-                                       f"@{realtime_data['current_price']:,}원 (사유: {sell_reason}) "
-                                       f"- 체결 대기 중 (웹소켓 체결통보 대기)")
-                        else:
-                            logger.error(f"❌ 매도 주문 접수 실패: {stock.stock_code} "
-                                        f"@{realtime_data['current_price']:,}원 (사유: {sell_reason})")
-                        
+                        # 중복 알림 방지
+                        signal_key = f"{stock.stock_code}_buy"
+                        self.alert_sent.discard(signal_key)
+                 
                 except Exception as e:
                     logger.error(f"매도 처리 오류 {stock.stock_code}: {e}")
                     continue
