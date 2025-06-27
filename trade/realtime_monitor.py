@@ -129,6 +129,20 @@ class RealTimeMonitor:
         self._recent_buy_times: Dict[str, datetime] = {}
         self.duplicate_buy_cooldown = self.performance_config.get('duplicate_buy_cooldown_seconds', 10)
         
+        # 🆕 BuyProcessor 초기화 (매수 조건/주문 위임)
+        from trade.realtime.buy_processor import BuyProcessor
+        self.buy_processor = BuyProcessor(
+            stock_manager=self.stock_manager,
+            trade_executor=self.trade_executor,
+            condition_analyzer=self.condition_analyzer,
+            performance_config=self.performance_config,
+            risk_config=self.risk_config,
+            duplicate_buy_cooldown=self.duplicate_buy_cooldown,
+        )
+
+        # RealTimeMonitor 와 최근 매수 시각 dict 공유 (기존 로직 호환)
+        self.buy_processor._recent_buy_times = self._recent_buy_times
+        
         logger.info("RealTimeMonitor 초기화 완료 (웹소켓 기반 최적화 버전 + 장중추가스캔)")
     
     @property
@@ -439,55 +453,68 @@ class RealTimeMonitor:
             # 🆕 데이트레이딩 모드 확인 (빠른 진입 vs 안전한 진입)
             daytrading_mode = self.performance_config.get('daytrading_aggressive_mode', False)
             
-            # 🔥 매수 조건 분석 및 주문 실행 (락 최적화)
+            # 🆕 매수 조건 분석 및 주문 실행 (BuyProcessor 위임 + 빠른모드 유지)
             for stock in ready_stocks:
                 result['checked'] += 1
-                
+
                 realtime_data = stock_realtime_data.get(stock.stock_code)
                 if not realtime_data:
                     continue
-                
+
                 try:
-                    # 🆕 데이트레이딩 모드별 매수 조건 선택
+                    # ------------------------------
+                    # 1) 매수 신호 판단
+                    # ------------------------------
                     if daytrading_mode:
-                        # 빠른 진입 모드 (간소화된 조건)
+                        # 기존 빠른 진입 로직 유지
                         buy_signal = self._analyze_fast_buy_conditions(stock, realtime_data)
                     else:
-                        # 기존 안전한 조건
-                        buy_signal = self._analyze_standard_buy_conditions(stock, realtime_data)
-                    
-                    if buy_signal:
-                        result['signaled'] += 1
-                        
-                        # 매수량 계산 (락 없는 계산)
+                        market_phase = self.get_market_phase()
+                        buy_signal = self.buy_processor.analyze_buy_conditions(
+                            stock, realtime_data, market_phase
+                        )
+
+                    if not buy_signal:
+                        continue
+
+                    result['signaled'] += 1
+
+                    # ------------------------------
+                    # 2) 주문 실행
+                    # ------------------------------
+                    if daytrading_mode:
+                        # 기존 방식 그대로 실행 (수량 계산 → 매수)
                         buy_quantity = self.calculate_buy_quantity(stock)
-                        
-                        if buy_quantity > 0:
-                            # 🔥 매수 주문 실행 (TradeExecutor 내부에서 상태 변경)
-                            success = self.trade_executor.execute_buy_order(
-                                stock=stock,
-                                price=realtime_data['current_price'],
-                                quantity=buy_quantity,
-                                current_positions_count=current_positions_count
-                            )
-                            
-                            if success:
-                                result['ordered'] += 1
-                                
-                                # 🔥 원자적 통계 업데이트 (스레드 안전)
-                                with self._stats_lock:
-                                    self._buy_orders_executed += 1
-                                
-                                # 최근 매수 시각 기록 (중복 방지)
-                                self._recent_buy_times[stock.stock_code] = now_kst()
-                                
-                                logger.info(f"📝 매수 주문 접수: {stock.stock_code} "
-                                           f"{buy_quantity}주 @{realtime_data['current_price']:,}원 "
-                                           f"- 체결 대기 중 (웹소켓 체결통보 대기)")
-                            else:
-                                logger.error(f"❌ 매수 주문 접수 실패: {stock.stock_code} "
-                                            f"{buy_quantity}주 @{realtime_data['current_price']:,}원")
-                        
+                        if buy_quantity <= 0:
+                            continue
+
+                        success = self.trade_executor.execute_buy_order(
+                            stock=stock,
+                            price=realtime_data['current_price'],
+                            quantity=buy_quantity,
+                            current_positions_count=current_positions_count,
+                        )
+                        if success:
+                            # 중복 방지용 최근 매수 시각 기록
+                            self._recent_buy_times[stock.stock_code] = now_kst()
+                            logger.info(
+                                f"📝 매수 주문 접수: {stock.stock_code} {buy_quantity}주 "
+                                f"@{realtime_data['current_price']:,}원 - 체결 대기" )
+                    else:
+                        success = self.buy_processor.analyze_and_buy(
+                            stock=stock,
+                            realtime_data=realtime_data,
+                            current_positions_count=current_positions_count,
+                            market_phase=self.get_market_phase(),
+                        )
+
+                    if success:
+                        result['ordered'] += 1
+
+                        # 🔥 원자적 통계 업데이트 (스레드 안전)
+                        with self._stats_lock:
+                            self._buy_orders_executed += 1
+
                 except Exception as e:
                     logger.error(f"매수 처리 오류 {stock.stock_code}: {e}")
                     continue
