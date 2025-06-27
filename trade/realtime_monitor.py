@@ -380,31 +380,9 @@ class RealTimeMonitor:
             return None
     
     def analyze_buy_conditions(self, stock: Stock, realtime_data: Dict) -> bool:
-        """매수 조건 분석 (TradingConditionAnalyzer 위임)
-        
-        Args:
-            stock: 주식 객체
-            realtime_data: 실시간 데이터
-            
-        Returns:
-            매수 조건 충족 여부
-        """
-        # 중복 신호 방지
-        signal_key = f"{stock.stock_code}_buy"
-        duplicate_prevention = signal_key not in self.alert_sent
-        
-        if not duplicate_prevention:
-            return False
-        
-        # TradingConditionAnalyzer에 위임
+        """(Deprecated) 기존 API 호환용 래퍼 – BuyProcessor 로 위임"""
         market_phase = self.get_market_phase()
-        buy_signal = self.condition_analyzer.analyze_buy_conditions(stock, realtime_data, market_phase)
-        
-        if buy_signal:
-            self.alert_sent.add(signal_key)
-            self._buy_signals_detected += 1
-        
-        return buy_signal
+        return self.buy_processor.analyze_buy_conditions(stock, realtime_data, market_phase)
     
     def analyze_sell_conditions(self, stock: Stock, realtime_data: Dict) -> Optional[str]:
         """매도 조건 분석 (TradingConditionAnalyzer 위임)
@@ -1087,12 +1065,5 @@ class RealTimeMonitor:
         except Exception as e:
             logger.error(f"_add_intraday_stock_safely 오류 {stock_code}: {e}")
             return False
-    
-    # ------------------------------------------------------------------
-    # Stub: pending websocket subscriptions (old logic not yet migrated)
-    # ------------------------------------------------------------------
-    def _process_pending_websocket_subscriptions(self):
-        """임시 스텁 – 웹소켓 구독 리팩터링 이전까지 비워둠"""
-        return
 
  
