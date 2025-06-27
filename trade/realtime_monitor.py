@@ -154,6 +154,10 @@ class RealTimeMonitor:
         )
 
         logger.info("RealTimeMonitor 초기화 완료 (웹소켓 기반 최적화 버전 + 장중추가스캔)")
+
+        # 🆕 MonitorCore 생성 (legacy monitor_cycle 위임용)
+        from trade.realtime.monitor_core import MonitorCore
+        self.core = MonitorCore(self)
     
     @property
     def is_monitoring(self) -> bool:
@@ -730,7 +734,7 @@ class RealTimeMonitor:
         # TradingConditionAnalyzer에 위임
         return self.condition_analyzer.calculate_buy_quantity(stock)
     
-    def monitor_cycle(self):
+    def monitor_cycle_legacy(self):
         """메인 모니터링 사이클 (스레드 분리)"""
         # 🔥 동시 실행 방지 (스레드 안전성 보장)
         if hasattr(self, '_cycle_executing') and self._cycle_executing:
@@ -1065,5 +1069,12 @@ class RealTimeMonitor:
         except Exception as e:
             logger.error(f"_add_intraday_stock_safely 오류 {stock_code}: {e}")
             return False
+
+    # ----------------------------------------------
+    # New wrapper – delegates to MonitorCore
+    # ----------------------------------------------
+    def monitor_cycle(self):
+        """MonitorCore.run_cycle 에 위임 (호환용)"""
+        return self.core.run_cycle()
 
  
