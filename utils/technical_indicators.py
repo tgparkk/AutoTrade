@@ -15,6 +15,9 @@ __all__ = [
     "compute_indicators",
     "calculate_daytrading_score",
     "DaytradingScoreCalculator",
+    "calculate_sma",
+    "calculate_divergence_rate",
+    "check_ma_alignment",
 ]
 
 
@@ -351,3 +354,58 @@ def calculate_daytrading_score(
     )
     
     return min(total_score, 100), score_detail
+
+
+# -----------------------------
+# Basic utility functions moved from MarketScanner
+# -----------------------------
+
+def calculate_sma(prices: list[float], period: int) -> float:
+    """단순이동평균(SMA) 계산
+
+    Parameters
+    ----------
+    prices : list[float]
+        가격(종가) 리스트 – 최신값이 index 0 인 형태를 가정해도 무방함
+    period : int
+        기간(일)
+
+    Returns
+    -------
+    float
+        SMA 값. 데이터 부족 시 0 반환.
+    """
+    if period <= 0 or len(prices) < period:
+        return 0.0
+
+    valid_prices = [p for p in prices[:period] if p > 0]
+    if not valid_prices:
+        return 0.0
+
+    return sum(valid_prices) / len(valid_prices)
+
+
+def calculate_divergence_rate(current_price: float, ma_price: float) -> float:
+    """현재가 대비 이동평균선 이격도(%) 계산"""
+    if current_price <= 0 or ma_price <= 0:
+        return 0.0
+    return (current_price - ma_price) / ma_price * 100
+
+
+def check_ma_alignment(closes: list[float]) -> bool:
+    """정배열 여부 확인 (현재가 > MA5 > MA10 > MA20)
+
+    Parameters
+    ----------
+    closes : list[float]
+        최근 20개 종가 리스트 (index 0 = 최신)
+    """
+    if len(closes) < 20:
+        return False
+
+    ma5 = calculate_sma(closes, 5)
+    ma10 = calculate_sma(closes, 10)
+    ma20 = calculate_sma(closes, 20)
+
+    current_price = closes[0]
+    return current_price > ma5 > ma10 > ma20

@@ -263,8 +263,10 @@ class MarketScanner:
                 macd_val = macd_signal = macd_hist = 0
                 volume_spike = 1
 
-            # 이동평균선 정배열 여부 (기존 함수 재사용)
-            ma_alignment = self._check_ma_alignment(recent_data)
+            # 이동평균선 정배열 여부 (기존 함수 → utils 함수)
+            from utils.technical_indicators import check_ma_alignment
+            closes_for_ma = [float(day.get('stck_clpr', 0)) for day in recent_data]
+            ma_alignment = check_ma_alignment(closes_for_ma)
             
             return {
                 'volume_increase_rate': volume_increase_rate,
@@ -325,32 +327,17 @@ class MarketScanner:
         return rsi
     
     def _check_ma_alignment(self, ohlcv_data: List) -> bool:
-        """이동평균선 정배열 여부 확인
-        
-        Args:
-            ohlcv_data: OHLCV 데이터
-            
-        Returns:
-            정배열 여부
-        """
+        """(Deprecated) utils.technical_indicators.check_ma_alignment 래퍼"""
         if _get_data_length(ohlcv_data) < 20:
             return False
-        
-        # DataFrame을 딕셔너리 리스트로 변환
+
         data_list = _convert_to_dict_list(ohlcv_data)
         if not data_list:
             return False
-        
+
+        from utils.technical_indicators import check_ma_alignment
         closes = [float(day.get('stck_clpr', 0)) for day in data_list[:20]]
-        
-        # 5일, 10일, 20일 이동평균 계산
-        ma5 = sum(closes[:5]) / 5
-        ma10 = sum(closes[:10]) / 10
-        ma20 = sum(closes) / 20
-        
-        # 정배열: 현재가 > MA5 > MA10 > MA20
-        current_price = closes[0]
-        return current_price > ma5 > ma10 > ma20
+        return check_ma_alignment(closes)
     
     def _calculate_macd_signal(self, ohlcv_data: List) -> str:
         """MACD 신호 계산 (단순화)
@@ -387,38 +374,14 @@ class MarketScanner:
     # ===== 이격도 계산 메서드 섹션 =====
     
     def _calculate_divergence_rate(self, current_price: float, ma_price: float) -> float:
-        """이격도 계산 (이동평균 대비)
-        
-        Args:
-            current_price: 현재가
-            ma_price: 이동평균가
-            
-        Returns:
-            이격도 (%) - 양수: 이평선 위, 음수: 이평선 아래
-        """
-        if current_price <= 0 or ma_price <= 0:
-            return 0.0
-        
-        return (current_price - ma_price) / ma_price * 100
+        """(Deprecated) utils.technical_indicators.calculate_divergence_rate 래퍼"""
+        from utils.technical_indicators import calculate_divergence_rate
+        return calculate_divergence_rate(current_price, ma_price)
     
     def _calculate_sma(self, prices: List[float], period: int) -> float:
-        """단순이동평균 계산
-        
-        Args:
-            prices: 가격 리스트
-            period: 기간
-            
-        Returns:
-            단순이동평균
-        """
-        if len(prices) < period or period <= 0:
-            return 0.0
-        
-        valid_prices = [p for p in prices[:period] if p > 0]
-        if not valid_prices:
-            return 0.0
-        
-        return sum(valid_prices) / len(valid_prices)
+        """(Deprecated) utils.technical_indicators.calculate_sma 래퍼"""
+        from utils.technical_indicators import calculate_sma
+        return calculate_sma(prices, period)
     
     def _get_divergence_analysis(self, stock_code: str, ohlcv_data: Any) -> Optional[Dict]:
         """종목별 이격도 종합 분석 (스크리닝용)
@@ -446,20 +409,22 @@ class MarketScanner:
             # 각종 이격도 계산
             divergences = {}
             
+            from utils.technical_indicators import calculate_sma, calculate_divergence_rate
+
             # 5일선 이격도
-            sma_5 = self._calculate_sma(prices, 5)
+            sma_5 = calculate_sma(prices, 5)
             if sma_5 > 0:
-                divergences['sma_5'] = self._calculate_divergence_rate(current_price, sma_5)
+                divergences['sma_5'] = calculate_divergence_rate(current_price, sma_5)
             
             # 10일선 이격도
-            sma_10 = self._calculate_sma(prices, 10)
+            sma_10 = calculate_sma(prices, 10)
             if sma_10 > 0:
-                divergences['sma_10'] = self._calculate_divergence_rate(current_price, sma_10)
+                divergences['sma_10'] = calculate_divergence_rate(current_price, sma_10)
             
             # 20일선 이격도
-            sma_20 = self._calculate_sma(prices, 20)
+            sma_20 = calculate_sma(prices, 20)
             if sma_20 > 0:
-                divergences['sma_20'] = self._calculate_divergence_rate(current_price, sma_20)
+                divergences['sma_20'] = calculate_divergence_rate(current_price, sma_20)
             
             # 전일 대비 변화율
             if len(data_list) > 1:
