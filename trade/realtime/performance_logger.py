@@ -45,10 +45,11 @@ class PerformanceLogger:
             logger.info("=" * 60)
             logger.info("📊 최종 성능 리포트")
             logger.info("=" * 60)
-            logger.info(f"총 스캔 횟수: {self.monitor._market_scan_count:,}회")
-            logger.info(f"매수 신호 감지: {self.monitor._buy_signals_detected}건")
-            logger.info(f"매도 신호 감지: {self.monitor._sell_signals_detected}건")
-            logger.info(f"주문 실행: {self.monitor._buy_orders_executed + self.monitor._sell_orders_executed}건")
+            st = self.monitor.stats_tracker
+            logger.info(f"총 스캔 횟수: {st.market_scan_count:,}회")
+            logger.info(f"매수 신호 감지: {st.buy_signals_detected}건")
+            logger.info(f"매도 신호 감지: {st.sell_signals_detected}건")
+            logger.info(f"주문 실행: {st.orders_executed}건")
 
             trade_stats = self.monitor.trade_executor.get_trade_statistics()
             logger.info(
