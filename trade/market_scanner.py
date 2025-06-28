@@ -24,52 +24,18 @@ except ImportError:
 
 logger = setup_logger(__name__)
 
-# 기술적 지표 유틸
-from utils.technical_indicators import compute_indicators
-import pandas as pd
+# 공통 유틸 함수 (scanner.utils)
+from trade.scanner.utils import (
+    is_data_empty as _is_data_empty,
+    get_data_length as _get_data_length,
+    convert_to_dict_list as _convert_to_dict_list,
+)
 
-def _is_data_empty(data: Any) -> bool:
-    """데이터가 비어있는지 안전하게 체크하는 함수"""
-    if data is None:
-        return True
-    if hasattr(data, 'empty'):  # DataFrame
-        return data.empty
-    if hasattr(data, '__len__'):  # List, tuple 등
-        return len(data) == 0
-    return False
-
-
-def _get_data_length(data: Any) -> int:
-    """데이터 길이를 안전하게 가져오는 함수"""
-    if data is None:
-        return 0
-    if hasattr(data, '__len__'):
-        return len(data)
-    return 0
-
-
-def _convert_to_dict_list(ohlcv_data: Any) -> List[Dict]:
-    """OHLCV 데이터를 딕셔너리 리스트로 변환"""
-    if ohlcv_data is None:
-        return []
-    
-    # DataFrame인 경우
-    if hasattr(ohlcv_data, 'to_dict'):
-        try:
-            # DataFrame을 딕셔너리 리스트로 변환
-            return ohlcv_data.to_dict('records')
-        except Exception as e:
-            logger.debug(f"DataFrame 변환 실패: {e}")
-            return []
-    
-    # 이미 리스트인 경우
-    if isinstance(ohlcv_data, list):
-        return ohlcv_data
-    
-    # 기타 경우
-    logger.debug(f"알 수 없는 데이터 타입: {type(ohlcv_data)}")
-    return []
-
+# 실시간 divergence 계산 모듈
+from trade.scanner.realtime_divergence import (
+    get_stock_divergence_rates as compute_rt_divergence_rates,
+    get_stock_divergence_signal as compute_rt_divergence_signal,
+)
 
 class MarketScanner:
     """장시작전 시장 전체 스캔 및 종목 선정을 담당하는 클래스"""
@@ -214,120 +180,21 @@ class MarketScanner:
         Returns:
             분석 결과 딕셔너리 또는 None (데이터 부족시)
         """
-        if _get_data_length(ohlcv_data) < 20:  # 최소 20일 데이터 필요
-            logger.warning(f"데이터가 부족합니다 {stock_code}: {_get_data_length(ohlcv_data)}일")
-            return None
-        
-        try:
-            # DataFrame을 딕셔너리 리스트로 변환
-            data_list = _convert_to_dict_list(ohlcv_data)
-            if not data_list:
-                logger.warning(f"OHLCV 데이터 변환 실패: {stock_code}")
-                return None
-            
-            # 최근 데이터부터 정렬 (API는 보통 최신부터 내림차순)
-            recent_data = data_list[:20]  # 최근 20일
-            
-            # 거래량 분석 – 평균 및 증가율 계산
-            recent_volumes = [float(day.get('acml_vol', 0)) for day in recent_data[:5]]
-            previous_volumes = [float(day.get('acml_vol', 0)) for day in recent_data[5:10]]
-
-            recent_avg_vol = sum(recent_volumes) / len(recent_volumes) if recent_volumes else 1
-            previous_avg_vol = sum(previous_volumes) / len(previous_volumes) if previous_volumes else 1
-            volume_increase_rate = recent_avg_vol / previous_avg_vol if previous_avg_vol > 0 else 1
-
-            # 전체 10일 평균 거래량 및 거래대금(저유동 필터용) – 최근 10일로 완화
-            ten_day_data = recent_data[:10]
-            all_volumes_10d = [float(day.get('acml_vol', 0)) for day in ten_day_data]
-            avg_daily_volume_10d = sum(all_volumes_10d) / len(all_volumes_10d) if all_volumes_10d else 0
-            avg_daily_trading_value = avg_daily_volume_10d * float(recent_data[0].get('stck_clpr', 0))  # 원단위
-            
-            # 가격 변동률 (전일 대비)
-            today_close = float(recent_data[0].get('stck_clpr', 0))
-            yesterday_close = float(recent_data[1].get('stck_clpr', 0)) if len(recent_data) > 1 else today_close
-            price_change_rate = (today_close - yesterday_close) / yesterday_close if yesterday_close > 0 else 0
-
-            # ---------------------------
-            # 🆕 기술적 지표 계산 (RSI, MACD 등)
-            # ---------------------------
-            try:
-                df_full = pd.DataFrame(recent_data[::-1])  # 오래된→신규 순으로 역전
-                indi = compute_indicators(df_full, close_col="stck_clpr", volume_col="acml_vol")
-                rsi = indi.get("rsi", 50)
-                macd_val = indi.get("macd", 0)
-                macd_signal = indi.get("macd_signal", 0)
-                macd_hist = indi.get("macd_hist", 0)
-                volume_spike = indi.get("volume_spike", 1)
-            except Exception:
-                rsi = 50
-                macd_val = macd_signal = macd_hist = 0
-                volume_spike = 1
-
-            # 이동평균선 정배열 여부 (기존 함수 → utils 함수)
-            from utils.technical_indicators import check_ma_alignment
-            closes_for_ma = [float(day.get('stck_clpr', 0)) for day in recent_data]
-            ma_alignment = check_ma_alignment(closes_for_ma)
-            
-            return {
-                'volume_increase_rate': volume_increase_rate,
-                'yesterday_volume': int(recent_volumes[1]) if len(recent_volumes) > 1 else 0,
-                'avg_daily_volume': avg_daily_volume_10d,
-                'avg_daily_trading_value': avg_daily_trading_value,
-                'price_change_rate': price_change_rate,
-                'rsi': rsi,
-                'macd_signal': macd_signal,
-                'macd': macd_val,
-                'macd_hist': macd_hist,
-                'volume_spike_ratio': volume_spike,
-                'ma_alignment': ma_alignment,
-                'support_level': min([float(day.get('stck_lwpr', 0)) for day in recent_data[:10]]),
-                'resistance_level': max([float(day.get('stck_hgpr', 0)) for day in recent_data[:10]])
-            }
-            
-        except Exception as e:
-            logger.error(f"실제 데이터 분석 실패 {stock_code}: {e}")
-            return None
-    
-    def _calculate_rsi(self, closes: List[float]) -> float:
-        """(Deprecated) utils.calculate_rsi 래퍼"""
-        from utils.technical_indicators import calculate_rsi
-        return calculate_rsi(closes)
-    
-    def _check_ma_alignment(self, ohlcv_data: List) -> bool:
-        """(Deprecated) utils.technical_indicators.check_ma_alignment 래퍼"""
-        if _get_data_length(ohlcv_data) < 20:
-            return False
-
-        data_list = _convert_to_dict_list(ohlcv_data)
-        if not data_list:
-            return False
-
-        from utils.technical_indicators import check_ma_alignment
-        closes = [float(day.get('stck_clpr', 0)) for day in data_list[:20]]
-        return check_ma_alignment(closes)
-    
-    def _calculate_macd_signal(self, ohlcv_data: List) -> str:
-        """(Deprecated) utils.calculate_macd_signal_simple 래퍼"""
-        if _get_data_length(ohlcv_data) < 26:
-            return 'neutral'
-        data_list = _convert_to_dict_list(ohlcv_data)
-        if not data_list:
-            return 'neutral'
-        from utils.technical_indicators import calculate_macd_signal_simple
-        closes = [float(day.get('stck_clpr', 0)) for day in data_list[:26]]
-        return calculate_macd_signal_simple(closes)
+        # 외부 모듈(trade.scanner.fundamental) 로직으로 위임
+        from trade.scanner.fundamental import calculate_fundamentals
+        return calculate_fundamentals(stock_code, ohlcv_data)
     
     # ===== 이격도 계산 메서드 섹션 =====
     
-    def _calculate_divergence_rate(self, current_price: float, ma_price: float) -> float:
-        """(Deprecated) utils.technical_indicators.calculate_divergence_rate 래퍼"""
-        from utils.technical_indicators import calculate_divergence_rate
-        return calculate_divergence_rate(current_price, ma_price)
+    def get_stock_divergence_rates(self, stock: 'Stock') -> Dict[str, float]:
+        """얇은 래퍼 – 실시간 이격도 계산 (trade.scanner.realtime_divergence 사용)"""
+        return compute_rt_divergence_rates(stock)
     
-    def _calculate_sma(self, prices: List[float], period: int) -> float:
-        """(Deprecated) utils.technical_indicators.calculate_sma 래퍼"""
-        from utils.technical_indicators import calculate_sma
-        return calculate_sma(prices, period)
+    def get_stock_divergence_signal(self, stock: 'Stock') -> Dict[str, Any]:
+        """얇은 래퍼 – 실시간 매매 신호 (trade.scanner.realtime_divergence 사용)"""
+        return compute_rt_divergence_signal(stock)
+    
+    # ===== 실시간 이격도 분석 (Stock 객체용) =====
     
     def _get_divergence_analysis(self, stock_code: str, ohlcv_data: Any) -> Optional[Dict]:
         """종목별 이격도 종합 분석 (스크리닝용)
@@ -340,177 +207,12 @@ class MarketScanner:
             이격도 분석 결과 또는 None
         """
         try:
-            # 데이터 변환
-            data_list = _convert_to_dict_list(ohlcv_data)
-            if len(data_list) < 20:
-                return None
-            
-            # 현재가 및 과거 가격 데이터
-            current_price = float(data_list[0].get('stck_clpr', 0))
-            if current_price <= 0:
-                return None
-            
-            prices = [float(day.get('stck_clpr', 0)) for day in data_list[:20]]
-            
-            from utils.technical_indicators import divergence_analysis
-            return divergence_analysis(prices)
+            from trade.scanner.divergence import analyze_divergence
+            return analyze_divergence(stock_code, ohlcv_data)
             
         except Exception as e:
             logger.debug(f"이격도 분석 실패 {stock_code}: {e}")
             return None
-    
-    def _get_divergence_signal(self, divergence_analysis: Dict) -> Dict[str, Any]:
-        """이격도 기반 매매 신호 생성 (스크리닝용)
-        
-        Args:
-            divergence_analysis: 이격도 분석 결과
-            
-        Returns:
-            매매 신호 딕셔너리
-        """
-        if not divergence_analysis:
-            return {'signal': 'HOLD', 'reason': '분석 데이터 없음', 'score': 0}
-        
-        divergences = divergence_analysis.get('divergences', {})
-        
-        sma_5_div = divergences.get('sma_5', 0)
-        sma_10_div = divergences.get('sma_10', 0) 
-        sma_20_div = divergences.get('sma_20', 0)
-        
-        signal = 'HOLD'
-        reason = []
-        score = 0
-        
-        # 매수 신호 (과매도) - 스크리닝에서는 보수적 기준 적용
-        if sma_20_div <= -5 or (sma_10_div <= -3 and sma_5_div <= -2):
-            signal = 'BUY'
-            score = 15 + abs(min(sma_20_div, sma_10_div, sma_5_div)) * 0.5  # 이격도 기반 점수
-            reason.append(f"과매도 구간 (5일:{sma_5_div:.1f}%, 10일:{sma_10_div:.1f}%, 20일:{sma_20_div:.1f}%)")
-        
-        # 상승 모멘텀 (적당한 상승 이격도)
-        elif 1 <= sma_5_div <= 3 and 0 <= sma_10_div <= 2 and -1 <= sma_20_div <= 1:
-            signal = 'MOMENTUM'
-            score = 10  # 모멘텀 점수
-            reason.append(f"상승 모멘텀 (5일:{sma_5_div:.1f}%, 10일:{sma_10_div:.1f}%, 20일:{sma_20_div:.1f}%)")
-        
-        # 과매수 주의 (스크리닝에서는 제외 대상)
-        elif sma_20_div >= 10 or sma_10_div >= 7 or sma_5_div >= 5:
-            signal = 'OVERHEATED'
-            score = -5  # 감점
-            reason.append(f"과열 구간 (5일:{sma_5_div:.1f}%, 10일:{sma_10_div:.1f}%, 20일:{sma_20_div:.1f}%)")
-        
-        return {
-            'signal': signal,
-            'reason': '; '.join(reason) if reason else '중립',
-            'score': score,
-            'divergences': divergences
-        }
-    
-    # ===== 실시간 이격도 분석 (Stock 객체용) =====
-    
-    def get_stock_divergence_rates(self, stock: 'Stock') -> Dict[str, float]:
-        """Stock 객체의 실시간 이격도 계산 (데이트레이딩용)
-        
-        Args:
-            stock: Stock 객체
-            
-        Returns:
-            각종 이격도 정보
-        """
-        current_price = stock.realtime_data.current_price
-        if current_price <= 0:
-            return {}
-        
-        divergences = {}
-        
-        # 20일선 이격도 (기준 데이터에서)
-        if stock.reference_data.sma_20 > 0:
-            divergences['sma_20'] = self._calculate_divergence_rate(current_price, stock.reference_data.sma_20)
-        
-        # 전일 종가 이격도
-        if stock.reference_data.yesterday_close > 0:
-            divergences['yesterday_close'] = self._calculate_divergence_rate(current_price, stock.reference_data.yesterday_close)
-        
-        # 당일 시가 이격도 (분봉 데이터가 있을 경우)
-        if stock.minute_1_data:
-            first_candle = stock.minute_1_data[0]
-            if first_candle.open_price > 0:
-                divergences['today_open'] = self._calculate_divergence_rate(current_price, first_candle.open_price)
-        
-        # 5분봉 단순 이동평균 이격도 (최근 5개 캔들)
-        if len(stock.minute_5_data) >= 5:
-            recent_prices = [candle.close_price for candle in stock.minute_5_data[-5:]]
-            sma_5min = self._calculate_sma(recent_prices, 5)
-            if sma_5min > 0:
-                divergences['sma_5min'] = self._calculate_divergence_rate(current_price, sma_5min)
-        
-        # 당일 고저점 대비 위치 (%)
-        if stock.realtime_data.today_high > 0 and stock.realtime_data.today_low > 0:
-            day_range = stock.realtime_data.today_high - stock.realtime_data.today_low
-            if day_range > 0:
-                divergences['daily_position'] = (
-                    (current_price - stock.realtime_data.today_low) / day_range * 100
-                )
-        
-        return divergences
-    
-    def get_stock_divergence_signal(self, stock: 'Stock') -> Dict[str, Any]:
-        """Stock 객체의 이격도 기반 실시간 매매 신호 (데이트레이딩용)
-        
-        Args:
-            stock: Stock 객체
-            
-        Returns:
-            매매 신호 딕셔너리
-        """
-        divergences = self.get_stock_divergence_rates(stock)
-        if not divergences:
-            return {'signal': 'HOLD', 'reason': '이격도 계산 불가', 'strength': 0}
-        
-        sma_20_div = divergences.get('sma_20', 0)
-        sma_5min_div = divergences.get('sma_5min', 0)
-        daily_pos = divergences.get('daily_position', 50)
-        
-        signal = 'HOLD'
-        reason = []
-        strength = 0  # 신호 강도 (0~10)
-        
-        # 강한 매수 신호
-        if sma_20_div <= -3 and daily_pos <= 20:
-            signal = 'STRONG_BUY'
-            strength = 8 + min(abs(sma_20_div), 7)
-            reason.append(f"강한 매수 (20일선:{sma_20_div:.1f}%, 일봉위치:{daily_pos:.0f}%)")
-        
-        # 일반 매수 신호
-        elif sma_20_div <= -2 or (sma_5min_div <= -1.5 and daily_pos <= 30):
-            signal = 'BUY'
-            strength = 5 + min(abs(sma_20_div), 3)
-            reason.append(f"매수 신호 (20일선:{sma_20_div:.1f}%, 5분선:{sma_5min_div:.1f}%)")
-        
-        # 강한 매도 신호
-        elif sma_20_div >= 5 and daily_pos >= 80:
-            signal = 'STRONG_SELL'
-            strength = -(8 + min(sma_20_div, 7))
-            reason.append(f"강한 매도 (20일선:{sma_20_div:.1f}%, 일봉위치:{daily_pos:.0f}%)")
-        
-        # 일반 매도 신호
-        elif sma_20_div >= 3 or (sma_5min_div >= 2 and daily_pos >= 70):
-            signal = 'SELL'
-            strength = -(5 + min(sma_20_div, 3))
-            reason.append(f"매도 신호 (20일선:{sma_20_div:.1f}%, 5분선:{sma_5min_div:.1f}%)")
-        
-        # 중립
-        elif abs(sma_20_div) <= 1 and 30 <= daily_pos <= 70:
-            signal = 'NEUTRAL'
-            strength = 1
-            reason.append("이격도 중립")
-        
-        return {
-            'signal': signal,
-            'reason': '; '.join(reason) if reason else '보류',
-            'strength': strength,
-            'divergences': divergences
-        }
     
     def _analyze_real_candle_patterns(self, stock_code: str, ohlcv_data: Any) -> Optional[Dict]:
         """(Deprecated) utils.analyze_candle_patterns 래퍼"""
@@ -519,189 +221,9 @@ class MarketScanner:
         return analyze_candle_patterns(data_list)
     
     def calculate_comprehensive_score(self, stock_code: str) -> Optional[float]:
-        """종합 점수 계산
-        
-        Args:
-            stock_code: 종목코드
-            
-        Returns:
-            종합 점수 (0~100) 또는 None (분석 실패시)
-        """
-        # 실제 API에서 데이터 조회 (한 번만 호출하여 효율성 향상)
-        ohlcv_data = None
-        try:
-            from api.kis_market_api import get_inquire_daily_itemchartprice
-            
-            logger.debug(f"📊 {stock_code} API 호출 시작")
-            ohlcv_data = get_inquire_daily_itemchartprice(
-                output_dv="2",
-                itm_no=stock_code,
-                period_code="D",
-                adj_prc="1"
-            )
-            
-            # 🔧 디버깅 로그 추가
-            if ohlcv_data is not None:
-                logger.debug(f"📊 {stock_code} API 성공: 타입={type(ohlcv_data)}, 길이={len(ohlcv_data)}")
-            else:
-                logger.debug(f"📊 {stock_code} API 실패: None 반환")
-                
-        except Exception as e:
-            logger.debug(f"📊 {stock_code} API 호출 실패: {e}")
-        
-        # 기본 분석 (같은 데이터 재사용)
-        if _is_data_empty(ohlcv_data):
-            logger.debug(f"📊 {stock_code} 데이터 없음으로 종목 제외")
-            return None
-        
-        logger.debug(f"📊 {stock_code} 기본 분석 시작")
-        fundamentals = self._calculate_real_fundamentals(stock_code, ohlcv_data)
-        if not fundamentals:
-            logger.debug(f"📊 {stock_code} 기본 분석 실패로 종목 제외")
-            return None
-        
-        # ------------------------------
-        # 🆕 저유동성 필터: 20일 평균 거래대금이 설정값(intraday_min_trading_value)보다 작으면 제외
-        # ------------------------------
-        if fundamentals.get('avg_daily_trading_value', 0) < self.min_trading_value:
-            logger.debug(
-                f"📊 {stock_code} 평균 거래대금 {fundamentals.get('avg_daily_trading_value',0)/1_000_000:,.1f}M < "
-                f"min_trading_value({self.min_trading_value/1_000_000}M) – 제외")
-            return None
-        
-        # 캔들패턴 분석 (같은 데이터 재사용)
-        if _get_data_length(ohlcv_data) < 5:
-            logger.debug(f"📊 {stock_code} 캔들패턴 분석용 데이터 부족으로 종목 제외 (길이: {_get_data_length(ohlcv_data)})")
-            return None
-        
-        logger.debug(f"📊 {stock_code} 캔들패턴 분석 시작")
-        patterns = self._analyze_real_candle_patterns(stock_code, ohlcv_data)
-        if not patterns:
-            logger.debug(f"📊 {stock_code} 캔들패턴 분석 실패로 종목 제외")
-            return None
-        
-        # 🆕 이격도 분석 추가 (같은 데이터 재사용)
-        logger.debug(f"📊 {stock_code} 이격도 분석 시작")
-        divergence_analysis = self._get_divergence_analysis(stock_code, ohlcv_data)
-        divergence_signal = self._get_divergence_signal(divergence_analysis) if divergence_analysis else None
-        
-        # ------------------------------------------------------------
-        # 🆕 시간외(전날 16~18시) 단일가 현재가 기반 갭 스코어 추가
-        #   - get_preopen_overtime_price() 사용
-        #   - 갭폭이 클수록 가산 (양(+)) / 감산 (음(-))
-        # ------------------------------------------------------------
-        preopen_score = 0
-        try:
-            from api.kis_preopen_api import get_preopen_overtime_price
-
-            pre_df = get_preopen_overtime_price(stock_code)
-            if pre_df is not None and not pre_df.empty:
-                row = pre_df.iloc[0]
-                after_price = float(row.get('ovtm_untp_prpr', 0))
-                after_volume = float(row.get('ovtm_untp_vol', 0))
-
-                pre_trading_value = after_price * after_volume  # 원 단위
-
-                # 거래정지(또는 위험+1) 표시가 있으면 즉시 제외
-                if str(row.get('trht_yn', 'N')).upper() == 'Y':
-                    logger.debug(f"🚫 {stock_code} 거래정지 표시 – 제외")
-                    return None
-
-                # 시간외 거래대금 점수화
-                if pre_trading_value >= 500_000_000:       # 5억 이상
-                    pre_val_score = 10
-                elif pre_trading_value >= 100_000_000:     # 1억 이상
-                    pre_val_score = 5
-                elif pre_trading_value >= 50_000_000:      # 0.5억 이상
-                    pre_val_score = 0
-                else:
-                    pre_val_score = -5
-
-                min_pre_val = self.performance_config.get('preopen_min_trading_value', 50_000_000)
-
-                # 저거래대금이면 즉시 제외
-                if pre_trading_value < min_pre_val:
-                    logger.debug(
-                        f"📊 {stock_code} 시간외 거래대금 {pre_trading_value/1_000_000:,.1f}M <"
-                        f" min_pre_val({min_pre_val/1_000_000}M) – 제외")
-                    return None
-
-                # 전일 종가(최근 일봉 close)를 구해 갭 계산
-                try:
-                    data_list = _convert_to_dict_list(ohlcv_data)
-                    yesterday_close = float(data_list[0].get('stck_clpr', 0)) if data_list else 0
-                except Exception:
-                    yesterday_close = 0
-
-                if after_price > 0 and yesterday_close > 0:
-                    gap_rate = (after_price - yesterday_close) / yesterday_close * 100
-
-                    if gap_rate >= 5:
-                        gap_score = 10
-                    elif gap_rate >= 3:
-                        gap_score = 7
-                    elif gap_rate >= 1:
-                        gap_score = 4
-                    elif gap_rate <= -3:
-                        gap_score = -5
-                    elif gap_rate <= -1:
-                        gap_score = -2
-                    else:
-                        gap_score = 0
-
-                    preopen_score = gap_score + pre_val_score
-
-                    logger.debug(
-                        f"📊 {stock_code} 시간외 갭 {gap_rate:+.2f}% → preopen_score {preopen_score:+}")
-        except Exception as e:
-            logger.debug(f"📊 {stock_code} 시간외 단일가 API 실패: {e}")
-        
-        # 점수 계산 (technical_indicators.py 위임)
-        from utils.technical_indicators import calculate_daytrading_score
-        
-        # 시간외 데이터 준비
-        preopen_data = {}
-        if preopen_score != 0:  # 시간외 데이터가 있는 경우
-            try:
-                # 갭 비율 추출
-                from api.kis_preopen_api import get_preopen_overtime_price
-                pre_df = get_preopen_overtime_price(stock_code)
-                if pre_df is not None and not pre_df.empty:
-                    row = pre_df.iloc[0]
-                    after_price = float(row.get('ovtm_untp_prpr', 0))
-                    after_volume = float(row.get('ovtm_untp_vol', 0))
-                    
-                    data_list = _convert_to_dict_list(ohlcv_data)
-                    yesterday_close = float(data_list[0].get('stck_clpr', 0)) if data_list else 0
-                    
-                    if after_price > 0 and yesterday_close > 0:
-                        gap_rate = (after_price - yesterday_close) / yesterday_close * 100
-                        preopen_data = {
-                            'gap_rate': gap_rate,
-                            'trading_value': after_price * after_volume
-                        }
-            except:
-                pass
-        
-        # 유동성 점수 추가
-        try:
-            liq_score = self.stock_manager.get_liquidity_score(stock_code)
-        except AttributeError:
-            liq_score = 0.0
-        fundamentals['liquidity_score'] = liq_score
-        
-        # 데이트레이딩 최적화 점수 계산
-        total_score, score_detail = calculate_daytrading_score(
-            fundamentals=fundamentals,
-            patterns=patterns,
-            divergence_signal=divergence_signal or {},  # None일 경우 빈 dict로 처리
-            preopen_data=preopen_data,
-            config=self.daytrading_config
-        )
-        
-        logger.debug(f"📊 {stock_code} {score_detail}")
-        
-        return min(total_score, 100)  # 최대 100점
+        """얇은 래퍼 – trade.scanner.scoring 모듈 호출"""
+        from trade.scanner.scoring import calculate_comprehensive_score as _calc
+        return _calc(self, stock_code)
     
     def get_stock_detailed_analysis(self, stock_code: str) -> Optional[Dict]:
         """종목 상세 분석 정보 조회 (기술적 지표 포함)
@@ -1252,106 +774,18 @@ class MarketScanner:
             return []
     
     def _analyze_orderbook_for_daytrading_flexible(self, stock_code: str) -> Tuple[float, str]:
-        """데이트레이딩용 호가창 분석 (유연한 조건)
-        
-        Args:
-            stock_code: 종목코드
-            
-        Returns:
-            (점수, 분석사유) 튜플
-        """
-        try:
-            from api.kis_market_api import get_inquire_price
-            
-            # 현재가 및 호가 정보 조회
-            price_data = get_inquire_price(div_code="J", itm_no=stock_code)
-            if price_data is None or price_data.empty:
-                return 0, ""
-            
-            row = price_data.iloc[0]
-            
-            # 🔧 호가 스프레드 분석 - 조건 대폭 완화
-            best_ask = float(row.get('askp1', 0))  # 매도 1호가
-            best_bid = float(row.get('bidp1', 0))  # 매수 1호가
-            
-            if best_ask > 0 and best_bid > 0:
-                spread_pct = (best_ask - best_bid) / best_bid * 100
-                
-                # 🔧 스프레드 기준 완화 (3% 이하면 모두 허용)
-                if spread_pct <= 1.0:
-                    spread_score = 5
-                    spread_reason = f"저스프레드({spread_pct:.2f}%)"
-                elif spread_pct <= 2.0:
-                    spread_score = 3
-                    spread_reason = f"적정스프레드({spread_pct:.2f}%)"
-                elif spread_pct <= 4.0:  # 🔧 기존 max_spread_pct 대신 고정값 사용
-                    spread_score = 1
-                    spread_reason = f"보통스프레드({spread_pct:.2f}%)"
-                else:
-                    return 0, f"고스프레드({spread_pct:.2f}%)"  # 🔧 제외 → 0점으로 완화
-            else:
-                spread_score = 0
-                spread_reason = ""
-            
-            # 🔧 호가량 분석 - 점수 완화
-            ask_qty = float(row.get('askp_rsqn1', 0))  # 매도 1호가량
-            bid_qty = float(row.get('bidp_rsqn1', 0))  # 매수 1호가량
-            
-            if ask_qty > 0 and bid_qty > 0:
-                bid_ask_ratio = bid_qty / (ask_qty + bid_qty)  # 매수 비중
-                
-                if bid_ask_ratio >= 0.55:  # 🔧 0.6 → 0.55로 완화
-                    volume_score = 3  # 🔧 5 → 3으로 완화
-                    volume_reason = f"매수우세({bid_ask_ratio:.1%})"
-                elif bid_ask_ratio >= 0.35:  # 🔧 0.4 → 0.35로 완화
-                    volume_score = 1  # 🔧 2 → 1로 완화
-                    volume_reason = f"호가균형({bid_ask_ratio:.1%})"
-                else:
-                    volume_score = 0  # 🔧 -2 → 0으로 완화 (감점 제거)
-                    volume_reason = f"매도우세({bid_ask_ratio:.1%})"
-            else:
-                volume_score = 0
-                volume_reason = ""
-            
-            total_score = spread_score + volume_score
-            reasons = [r for r in [spread_reason, volume_reason] if r]
-            
-            return total_score, "+".join(reasons)
-            
-        except Exception as e:
-            logger.debug(f"호가창 분석 실패 {stock_code}: {e}")
-            return 0, ""
+        """데이트레이딩용 호가창 분석 – 외부 모듈로 위임"""
+        from trade.scanner.orderbook import analyze_orderbook
+        return analyze_orderbook(stock_code, max_spread_pct=self.max_spread_pct)
     
     def _calculate_daytrading_timing_score(self) -> Tuple[float, str]:
-        """데이트레이딩 타이밍 점수 계산
-        
-        Returns:
-            (점수, 분석사유) 튜플
-        """
-        try:
-            current_time = now_kst()
-            hour = current_time.hour
-            minute = current_time.minute
-            
-            # 시간대별 데이트레이딩 유리도 점수
-            if 9 <= hour < 10:  # 오전 9-10시: 시초 변동성 높음
-                if minute <= 30:
-                    return 5, "시초고변동성"
-                else:
-                    return 3, "시초후반"
-            elif 10 <= hour < 11:  # 오전 10-11시: 안정적 트레이딩
-                return 6, "오전안정기"
-            elif 11 <= hour < 12:  # 오전 11-12시: 중간 조정
-                return 4, "오전후반"
-            elif 13 <= hour < 14:  # 오후 1-2시: 점심 후 재개장
-                return 5, "오후재개장"
-            elif 14 <= hour < 15:  # 오후 2-3시: 오후 트레이딩
-                return 6, "오후안정기"
-            elif 15 <= hour < 15 and minute <= 20:  # 마지막 20분: 마감 직전
-                return 3, "마감직전"
-            else:  # 장외시간
-                return 0, ""
-                
-        except Exception as e:
-            logger.debug(f"타이밍 점수 계산 실패: {e}")
-            return 0, ""
+        """데이트레이딩 타이밍 점수 – 외부 모듈로 위임"""
+        from trade.scanner.timing import calculate_timing_score
+        return calculate_timing_score()
+
+    # ===== 스크리닝용 정적 이격도 분석 =====
+
+    def _get_divergence_signal(self, divergence_analysis: Dict) -> Dict[str, Any]:
+        """이격도 기반 매매 신호 생성 (스크리닝용)"""
+        from trade.scanner.divergence import divergence_signal
+        return divergence_signal(divergence_analysis)
