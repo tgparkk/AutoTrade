@@ -338,10 +338,16 @@ class TradeManager:
                 # 초기화 시간을 위해 잠시 대기 (비동기)
                 await asyncio.sleep(2)
 
-                if not self.telegram_task.done():
-                    logger.info("✅ 텔레그램 봇 Task 시작 완료")
+                # 텔레그램 봇의 실제 상태 확인 (polling_task 기준)
+                if (self.telegram_task.done() and 
+                    self.telegram_bot.is_running and 
+                    self.telegram_bot.polling_task and 
+                    not self.telegram_bot.polling_task.done()):
+                    logger.info("✅ 텔레그램 봇 초기화 완료 및 폴링 활성화")
+                elif self.telegram_task.done() and not self.telegram_bot.is_running:
+                    logger.warning("⚠️ 텔레그램 봇 초기화 실패 – 오류 확인 필요")
                 else:
-                    logger.warning("⚠️ 텔레그램 봇 Task 가 즉시 종료되었습니다 – 오류 확인 필요")
+                    logger.info("✅ 텔레그램 봇 Task 실행 중...")
             
             else:
                 logger.warning("⚠️ 텔레그램 봇이 None입니다 - 초기화되지 않았음")
