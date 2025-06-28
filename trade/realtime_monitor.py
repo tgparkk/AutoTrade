@@ -98,6 +98,9 @@ class RealTimeMonitor:
         # 🆕 스레드 안전한 종료 플래그
         self._shutdown_requested = threading.Event()
         
+        # 🆕 monitor_cycle 재진입 방지 락
+        self._cycle_lock = threading.Lock()
+        
         # 🔥 설정 기반 시장 시간 (하드코딩 제거)
         self.market_open_time = dt_time(
             self.strategy_config.get('market_open_hour', 9), 

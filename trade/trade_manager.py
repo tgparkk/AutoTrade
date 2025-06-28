@@ -54,6 +54,7 @@ class TradeManager:
         
         # 텔레그램 봇 초기화
         self.telegram_bot = None
+        self.telegram_task = None  # 🆕 asyncio Task 참조
         logger.info("🔍 텔레그램 봇 초기화 시작...")
         self._initialize_telegram()
         logger.info(f"🔍 텔레그램 봇 초기화 완료: {self.telegram_bot}")
@@ -261,14 +262,14 @@ class TradeManager:
     
     def _should_run_pre_market(self) -> bool:
         """장시작전 프로세스 실행 여부 판단"""
-        current_time = now_kst()
-        current_hour = current_time.hour
-        
-        # 평일 08:00 ~ 09:00 사이에만 실행
-        if current_time.weekday() >= 5:  # 주말
+        current_dt = now_kst()
+
+        # 주말 제외
+        if current_dt.weekday() >= 5:
             return False
-        
-        return 8 <= current_hour < 9
+
+        # 평일 08:35:00 ~ 08:59:59 사이에만 실행
+        return (current_dt.hour == 8) and (current_dt.minute >= 35)
     
     def _is_market_hours(self) -> bool:
         """현재 장시간 여부 확인 (테스트 모드: 장외시간도 장중으로 가정)"""
@@ -310,7 +311,6 @@ class TradeManager:
         """전체 시스템 시작 (비동기 버전)"""
         logger.info("=== AutoTrade 시스템 시작 ===")
         
-        telegram_thread = None
         try:
             self.is_running = True
             
@@ -327,60 +327,22 @@ class TradeManager:
             # 1. 텔레그램 봇을 별도 스레드에서 시작 (주식 로직과 완전 분리)
             logger.info(f"🔍 텔레그램 봇 체크: self.telegram_bot = {self.telegram_bot}")
             if self.telegram_bot:
-                logger.info("텔레그램 봇을 별도 스레드에서 시작 중...")
-                
+                logger.info("텔레그램 봇을 asyncio Task 로 시작 중...")
+
                 # TradeManager 참조 설정
                 self.telegram_bot.set_trade_manager(self)
-                
-                # 🆕 텔레그램 봇을 별도 스레드에서 실행
-                def run_telegram_bot():
-                    """텔레그램 봇 전용 스레드 함수"""
-                    try:
-                        logger.info("🔍 텔레그램 봇 스레드 시작...")
-                        
-                        # 새로운 이벤트 루프 생성 (메인 루프와 독립)
-                        import asyncio
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        
-                        # 텔레그램 봇 시작
-                        if self.telegram_bot:
-                            loop.run_until_complete(self.telegram_bot.start())
-                        
-                        # 텔레그램 봇이 실행되는 동안 유지
-                        logger.info("✅ 텔레그램 봇 스레드 실행 중...")
-                        try:
-                            loop.run_forever()
-                        except KeyboardInterrupt:
-                            logger.info("텔레그램 봇 스레드 종료 신호 수신")
-                        finally:
-                            # 정리 작업
-                            if self.telegram_bot and hasattr(self.telegram_bot, 'stop'):
-                                loop.run_until_complete(self.telegram_bot.stop())
-                            loop.close()
-                            logger.info("✅ 텔레그램 봇 스레드 정리 완료")
-                            
-                    except Exception as tg_error:
-                        logger.error(f"❌ 텔레그램 봇 스레드 실행 실패: {tg_error}")
-                        import traceback
-                        logger.error(f"스택 트레이스: {traceback.format_exc()}")
-                
-                # 데몬 스레드로 시작 (메인 프로세스 종료시 함께 종료)
-                telegram_thread = threading.Thread(
-                    target=run_telegram_bot,
-                    name="TelegramBot-Thread",
-                    daemon=True
-                )
-                telegram_thread.start()
-                
-                # 텔레그램 봇 스레드가 시작될 때까지 잠시 대기
-                await asyncio.sleep(3)
-                
-                if telegram_thread.is_alive():
-                    logger.info("✅ 텔레그램 봇 별도 스레드 시작 완료")
+
+                # 텔레그램 봇을 메인 이벤트 루프에서 Task 로 실행
+                self.telegram_task = asyncio.create_task(self.telegram_bot.start(), name="TelegramBotTask")
+
+                # 초기화 시간을 위해 잠시 대기 (비동기)
+                await asyncio.sleep(2)
+
+                if not self.telegram_task.done():
+                    logger.info("✅ 텔레그램 봇 Task 시작 완료")
                 else:
-                    logger.warning("❌ 텔레그램 봇 스레드 시작 실패")
-                    
+                    logger.warning("⚠️ 텔레그램 봇 Task 가 즉시 종료되었습니다 – 오류 확인 필요")
+            
             else:
                 logger.warning("⚠️ 텔레그램 봇이 None입니다 - 초기화되지 않았음")
             
@@ -407,17 +369,21 @@ class TradeManager:
             logger.error(f"시스템 시작 오류: {e}")
             raise
         finally:
-            # 텔레그램 스레드 정리는 자동으로 처리됨 (daemon=True)
-            if telegram_thread and telegram_thread.is_alive():
-                logger.info("텔레그램 봇 스레드 종료 대기 중...")
-                # 데몬 스레드이므로 자동으로 종료됨
+            # 텔레그램 Task 취소 (시스템 종료 또는 예외 시)
+            if self.telegram_task and not self.telegram_task.done():
+                logger.info("텔레그램 봇 Task 취소 중...")
+                self.telegram_task.cancel()
+                try:
+                    await self.telegram_task
+                except asyncio.CancelledError:
+                    logger.info("텔레그램 봇 Task 취소 완료")
     
     async def _main_loop(self):
         """메인 실행 루프 - 매매 로직에만 집중하는 단순화된 버전"""
         logger.info("📅 주기적 시장 스캔 및 매매 루프 시작")
         
         # 1. 테스트용 초기 종목 분석 (한 번만)
-        await self._run_initial_test_scan()
+        #await self._run_initial_test_scan()
         
         # 2. 메인 루프 변수 초기화
         last_scan_date = None
@@ -429,11 +395,11 @@ class TradeManager:
                 current_date = current_time.date()
                 
                 #장시작전 스캔 처리
-                # if self._should_run_pre_market() and last_scan_date != current_date:
-                #     market_monitoring_active = await self._handle_pre_market_scan(
-                #         current_date, market_monitoring_active
-                #     )
-                #     last_scan_date = current_date
+                if self._should_run_pre_market() and last_scan_date != current_date:
+                    market_monitoring_active = await self._handle_pre_market_scan(
+                        current_date, market_monitoring_active
+                    )
+                    last_scan_date = current_date
                 
                 # 장시간 모니터링 처리
                 if self._is_market_hours() and not market_monitoring_active:
@@ -648,7 +614,14 @@ class TradeManager:
             except Exception as e:
                 logger.error(f"❌ 웹소켓 정리 중 오류: {e}")
             
-            # 3. 텔레그램 봇 중지
+            # 3. 텔레그램 봇 중지 및 Task 취소
+            if self.telegram_task and not self.telegram_task.done():
+                self.telegram_task.cancel()
+                try:
+                    await self.telegram_task
+                except asyncio.CancelledError:
+                    logger.info("텔레그램 봇 Task 취소 완료")
+
             if self.telegram_bot and hasattr(self.telegram_bot, 'stop'):
                 await self.telegram_bot.stop()
             

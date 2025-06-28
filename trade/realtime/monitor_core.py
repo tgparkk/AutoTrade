@@ -21,11 +21,11 @@ class MonitorCore:
     def run_cycle(self):
         """메인 모니터링 사이클 (기존 monitor_cycle_legacy 로직)"""
         # 🔥 동시 실행 방지 (스레드 안전성 보장)
-        if hasattr(self.monitor, '_cycle_executing') and getattr(self.monitor, '_cycle_executing', False):
+        #   전용 락을 non-blocking 으로 획득하여 재진입을 차단한다.
+        lock_acquired: bool = self.monitor._cycle_lock.acquire(blocking=False)
+        if not lock_acquired:
             logger.debug("⚠️ 이전 monitor_cycle() 아직 실행 중 - 이번 사이클 건너뜀")
             return
-        
-        setattr(self.monitor, '_cycle_executing', True)
         
         try:
             # 통계 증가 (StatsTracker 사용)
@@ -106,8 +106,9 @@ class MonitorCore:
         except Exception as e:
             logger.error(f"모니터링 사이클 오류: {e}")
         finally:
-            # 🔥 반드시 실행 플래그 해제 (예외 발생시에도)
-            setattr(self.monitor, '_cycle_executing', False)
+            # 🔥 반드시 락 해제 (예외 발생시에도)
+            if lock_acquired:
+                self.monitor._cycle_lock.release()
 
     def loop(self):
         """메인 모니터링 루프 (미구현)"""
