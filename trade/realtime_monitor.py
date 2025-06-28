@@ -605,4 +605,8 @@ class RealTimeMonitor:
         """MonitorCore.run_cycle 에 위임 (호환용)"""
         return self.core.run_cycle()
 
+    def _analyze_fast_buy_conditions(self, stock: "Stock", realtime_data: Dict) -> bool:
+        # 남겨둔 호환용 더미 – 호출 시 False 반환
+        return False
+
  

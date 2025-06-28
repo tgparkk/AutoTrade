@@ -53,8 +53,6 @@ class BuyRunner:
                 except Exception as exc:  # pylint: disable=broad-except
                     logger.debug(f"실시간 데이터 조회 실패 {stk.stock_code}: {exc}")
 
-            aggressive = self.m.daytrading_config.get("daytrading_aggressive_mode", False)
-
             for stk in ready_stocks:
                 result["checked"] += 1
                 rt = rt_dict.get(stk.stock_code)
@@ -62,37 +60,21 @@ class BuyRunner:
                     continue
 
                 try:
-                    # 1) 신호 판단
-                    if aggressive:
-                        buy_signal = self.m._analyze_fast_buy_conditions(stk, rt)
-                    else:
-                        buy_signal = self.m.buy_processor.analyze_buy_conditions(
-                            stk, rt, self.m.get_market_phase()
-                        )
+                    # 1) 신호 판단 (BuyProcessor 사용)
+                    buy_signal = self.m.buy_processor.analyze_buy_conditions(
+                        stk, rt, self.m.get_market_phase()
+                    )
                     if not buy_signal:
                         continue
                     result["signaled"] += 1
 
-                    # 2) 주문 실행
-                    if aggressive:
-                        qty = self.m.calculate_buy_quantity(stk)
-                        if qty <= 0:
-                            continue
-                        success = self.m.trade_executor.execute_buy_order(
-                            stock=stk,
-                            price=rt["current_price"],
-                            quantity=qty,
-                            current_positions_count=current_positions,
-                        )
-                        if success:
-                            self.m._recent_buy_times[stk.stock_code] = now_kst()
-                    else:
-                        success = self.m.buy_processor.analyze_and_buy(
-                            stock=stk,
-                            realtime_data=rt,
-                            current_positions_count=current_positions,
-                            market_phase=self.m.get_market_phase(),
-                        )
+                    # 2) 주문 실행 (BuyProcessor 사용)
+                    success = self.m.buy_processor.analyze_and_buy(
+                        stock=stk,
+                        realtime_data=rt,
+                        current_positions_count=current_positions,
+                        market_phase=self.m.get_market_phase(),
+                    )
 
                     if success:
                         result["ordered"] += 1
