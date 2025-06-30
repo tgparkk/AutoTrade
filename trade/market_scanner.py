@@ -576,59 +576,7 @@ class MarketScanner:
             
             candidate_stocks = {}  # {종목코드: {'score': 점수, 'reasons': [사유들]}}
 
-            # ===== 순위 API 병렬 호출 유틸 =====
-            def _fetch_rank_data_parallel(self) -> Dict[str, Any]:
-                """4개의 주요 순위 API를 스레드 풀(ThreadPoolExecutor)로 병렬 호출하여
-                병합된 결과를 반환한다. 네트워크 I/O 개선 목적."""
-
-                try:
-                    from concurrent.futures import ThreadPoolExecutor, as_completed
-                    from api.kis_market_api import (
-                        get_disparity_rank, get_fluctuation_rank,
-                        get_volume_rank, get_bulk_trans_num_rank,
-                    )
-
-                    max_workers = self.performance_config.get('intraday_parallel_workers', 4)
-
-                    api_specs = {
-                        'disparity': (
-                            get_disparity_rank,
-                            dict(fid_input_iscd="0001", fid_rank_sort_cls_code="1", fid_hour_cls_code="20"),
-                        ),
-                        'fluctuation': (
-                            get_fluctuation_rank,
-                            dict(fid_input_iscd="0001", fid_rank_sort_cls_code="0", fid_rsfl_rate1="0.2", fid_rsfl_rate2="12.0"),
-                        ),
-                        'volume': (
-                            get_volume_rank,
-                            dict(fid_input_iscd="0001", fid_blng_cls_code="1"),
-                        ),
-                        'strength': (
-                            get_bulk_trans_num_rank,
-                            dict(fid_input_iscd="0001", fid_rank_sort_cls_code="0"),
-                        ),
-                    }
-
-                    results: Dict[str, Any] = {k: None for k in api_specs}
-                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        future_key = {
-                            executor.submit(func, **params): key
-                            for key, (func, params) in api_specs.items()
-                        }
-                        for fut in as_completed(future_key):
-                            key = future_key[fut]
-                            try:
-                                results[key] = fut.result()
-                            except Exception as exc:
-                                logger.error(f"{key} rank API 병렬 호출 실패: {exc}")
-
-                    return results
-
-                except Exception as e:
-                    logger.error(f"순위 API 병렬 호출 준비 실패: {e}")
-                    return {'disparity': None, 'fluctuation': None, 'volume': None, 'strength': None}
-
-            # --- 병렬 API 호출로 순위 데이터 취득 ---
+            # === 순위 API 병렬 호출 (클래스 메서드 사용) ===
             rank_data = self._fetch_rank_data_parallel()
             disparity_data   = rank_data.get('disparity')
             fluctuation_data = rank_data.get('fluctuation')
