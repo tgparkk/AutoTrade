@@ -49,8 +49,8 @@ class IntradayScanWorker:
             current_time = now_kst()
 
             # 마감시간 전이면 수행 금지
-            if current_time.time() >= self.monitor.pre_close_time:
-                return
+            #if current_time.time() >= self.monitor.pre_close_time:
+            #    return
 
             # 종목 수 한도 체크
             websocket_max = cfg.get('websocket_max_connections', 41)

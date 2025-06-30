@@ -575,15 +575,68 @@ class MarketScanner:
             logger.debug(f"기존 관리 종목 제외: {len(excluded_codes)}개 ({', '.join(list(excluded_codes)[:5])}{'...' if len(excluded_codes) > 5 else ''})")
             
             candidate_stocks = {}  # {종목코드: {'score': 점수, 'reasons': [사유들]}}
-            
+
+            # ===== 순위 API 병렬 호출 유틸 =====
+            def _fetch_rank_data_parallel(self) -> Dict[str, Any]:
+                """4개의 주요 순위 API를 스레드 풀(ThreadPoolExecutor)로 병렬 호출하여
+                병합된 결과를 반환한다. 네트워크 I/O 개선 목적."""
+
+                try:
+                    from concurrent.futures import ThreadPoolExecutor, as_completed
+                    from api.kis_market_api import (
+                        get_disparity_rank, get_fluctuation_rank,
+                        get_volume_rank, get_bulk_trans_num_rank,
+                    )
+
+                    max_workers = self.performance_config.get('intraday_parallel_workers', 4)
+
+                    api_specs = {
+                        'disparity': (
+                            get_disparity_rank,
+                            dict(fid_input_iscd="0001", fid_rank_sort_cls_code="1", fid_hour_cls_code="20"),
+                        ),
+                        'fluctuation': (
+                            get_fluctuation_rank,
+                            dict(fid_input_iscd="0001", fid_rank_sort_cls_code="0", fid_rsfl_rate1="0.2", fid_rsfl_rate2="12.0"),
+                        ),
+                        'volume': (
+                            get_volume_rank,
+                            dict(fid_input_iscd="0001", fid_blng_cls_code="1"),
+                        ),
+                        'strength': (
+                            get_bulk_trans_num_rank,
+                            dict(fid_input_iscd="0001", fid_rank_sort_cls_code="0"),
+                        ),
+                    }
+
+                    results: Dict[str, Any] = {k: None for k in api_specs}
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        future_key = {
+                            executor.submit(func, **params): key
+                            for key, (func, params) in api_specs.items()
+                        }
+                        for fut in as_completed(future_key):
+                            key = future_key[fut]
+                            try:
+                                results[key] = fut.result()
+                            except Exception as exc:
+                                logger.error(f"{key} rank API 병렬 호출 실패: {exc}")
+
+                    return results
+
+                except Exception as e:
+                    logger.error(f"순위 API 병렬 호출 준비 실패: {e}")
+                    return {'disparity': None, 'fluctuation': None, 'volume': None, 'strength': None}
+
+            # --- 병렬 API 호출로 순위 데이터 취득 ---
+            rank_data = self._fetch_rank_data_parallel()
+            disparity_data   = rank_data.get('disparity')
+            fluctuation_data = rank_data.get('fluctuation')
+            volume_data      = rank_data.get('volume')
+            strength_data    = rank_data.get('strength')
+
             # 🔧 1. 이격도 순위 (과매도 구간) - 조건 완화
             logger.debug("📊 이격도 순위 조회 (과매도)")
-            disparity_data = get_disparity_rank(
-                fid_input_iscd="0001",  # 전체
-                fid_rank_sort_cls_code="1",  # 이격도 하위순 (과매도)
-                fid_hour_cls_code="20"  # 20일 이격도
-            )
-            
             if disparity_data is not None and len(disparity_data) > 0:
                 for idx, row in disparity_data.head(self.rank_head_limit).iterrows():
                     code = row.get('mksc_shrn_iscd', '')
@@ -604,13 +657,6 @@ class MarketScanner:
             
             # 🔧 2. 등락률 순위 (상승 모멘텀) - 구간 확대
             logger.debug("📊 등락률 순위 조회 (상승)")
-            fluctuation_data = get_fluctuation_rank(
-                fid_input_iscd="0001",  # 전체
-                fid_rank_sort_cls_code="0",  # 상승률순
-                fid_rsfl_rate1="0.2",  # 🔧 0.5% → 0.2%로 완화
-                fid_rsfl_rate2="12.0"  # 🔧 8% → 12%로 확대
-            )
-            
             if fluctuation_data is not None and len(fluctuation_data) > 0:
                 for idx, row in fluctuation_data.head(self.rank_head_limit).iterrows():
                     code = row.get('mksc_shrn_iscd', '')
@@ -633,11 +679,6 @@ class MarketScanner:
             
             # 🔧 3. 거래량 순위 (관심도) - 조건 대폭 완화
             logger.debug("📊 거래량 순위 조회")
-            volume_data = get_volume_rank(
-                fid_input_iscd="0001",  # 전체
-                fid_blng_cls_code="1"   # 거래증가율
-            )
-            
             if volume_data is not None and len(volume_data) > 0:
                 for idx, row in volume_data.head(self.rank_head_limit).iterrows():
                     code = row.get('mksc_shrn_iscd', '')
@@ -665,11 +706,6 @@ class MarketScanner:
             
             # 🔧 4. 체결강도 상위 (매수세) - 단순화
             logger.debug("📊 체결강도 순위 조회")
-            strength_data = get_bulk_trans_num_rank(
-                fid_input_iscd="0001",  # 전체
-                fid_rank_sort_cls_code="0"  # 매수상위
-            )
-            
             if strength_data is not None and len(strength_data) > 0:
                 for idx, row in strength_data.head(self.rank_head_limit).iterrows():
                     code = row.get('mksc_shrn_iscd', '')
@@ -789,3 +825,52 @@ class MarketScanner:
         """이격도 기반 매매 신호 생성 (스크리닝용)"""
         from trade.scanner.divergence import divergence_signal
         return divergence_signal(divergence_analysis)
+
+    # ===== 순위 API 병렬 호출 유틸 (클래스 레벨) =====
+    def _fetch_rank_data_parallel(self) -> Dict[str, Any]:
+        """4개의 주요 순위 API를 ThreadPoolExecutor 로 병렬 호출하여 결과를 합친다."""
+        try:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            from api.kis_market_api import (
+                get_disparity_rank, get_fluctuation_rank,
+                get_volume_rank, get_bulk_trans_num_rank,
+            )
+
+            max_workers = self.performance_config.get('intraday_parallel_workers', 4)
+
+            api_specs = {
+                'disparity': (
+                    get_disparity_rank,
+                    dict(fid_input_iscd="0001", fid_rank_sort_cls_code="1", fid_hour_cls_code="20"),
+                ),
+                'fluctuation': (
+                    get_fluctuation_rank,
+                    dict(fid_input_iscd="0001", fid_rank_sort_cls_code="0", fid_rsfl_rate1="0.2", fid_rsfl_rate2="12.0"),
+                ),
+                'volume': (
+                    get_volume_rank,
+                    dict(fid_input_iscd="0001", fid_blng_cls_code="1"),
+                ),
+                'strength': (
+                    get_bulk_trans_num_rank,
+                    dict(fid_input_iscd="0001", fid_rank_sort_cls_code="0"),
+                ),
+            }
+
+            results: Dict[str, Any] = {k: None for k in api_specs}
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_key = {
+                    executor.submit(func, **params): key
+                    for key, (func, params) in api_specs.items()
+                }
+                for fut in as_completed(future_key):
+                    key = future_key[fut]
+                    try:
+                        results[key] = fut.result()
+                    except Exception as exc:
+                        logger.error(f"{key} rank API 병렬 호출 실패: {exc}")
+
+            return results
+        except Exception as e:
+            logger.error(f"순위 API 병렬 호출 준비 실패: {e}")
+            return {'disparity': None, 'fluctuation': None, 'volume': None, 'strength': None}

@@ -631,6 +631,8 @@ class KISWebSocketManager:
                 
                 if await self.connection.connect():
                     logger.info(f"✅ 웹소켓 재연결 성공 ({attempt}회 시도)")
+                    # 재연결 후 실행 상태 플래그 복구
+                    self.connection.is_running = True
                     
                     # 계좌 체결통보 재구독
                     if await self._subscribe_account_notices():

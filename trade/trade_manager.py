@@ -265,8 +265,8 @@ class TradeManager:
         current_dt = now_kst()
 
         # 주말 제외
-        if current_dt.weekday() >= 5:
-            return False
+        #if current_dt.weekday() >= 5:
+        #    return False
 
         # 평일 08:35:00 ~ 08:59:59 사이에만 실행
         return (current_dt.hour == 8) and (current_dt.minute >= 35)

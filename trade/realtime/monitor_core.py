@@ -37,6 +37,8 @@ class MonitorCore:
             
             # 테스트 모드 설정 (config에서 로드)
             test_mode = self.monitor.strategy_config.get('test_mode', True)
+
+            #self.monitor._check_and_run_intraday_scan()
             
             if not test_mode:
                 # 실제 운영 모드: 시장시간 체크
