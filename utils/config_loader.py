@@ -105,7 +105,9 @@ class TradingConfigLoader:
             'max_holding_days': self.get_int('MAX_HOLDING_DAYS', section, 1),
             'next_day_force_sell': self.get_bool('NEXT_DAY_FORCE_SELL', section, True),
             'overnight_holding_allowed': self.get_bool('OVERNIGHT_HOLDING_ALLOWED', section, True),
-            'test_mode': self.get_bool('test_mode', section, True)  # 테스트 모드 설정 추가
+            'test_mode': self.get_bool('test_mode', section, True),  # 테스트 모드 설정 추가
+            # 상한가 직전 익절 매도 임계값 (% 기준)
+            'limit_up_profit_rate': self.get_float('LIMIT_UP_PROFIT_RATE', section, 29.0),
         }
         
         logger.info("거래 전략 설정 로드 완료")

@@ -156,8 +156,12 @@ class BuyProcessor:
     ) -> bool:
         """매수 전 공통 선행 체크"""
         try:
-            # 1) 이미 보유 중인 종목은 패스
-            if stock.status == StockStatus.BOUGHT:
+            # 1) 이미 보유 중이거나 매수 주문이 진행중인 종목은 패스
+            if stock.status in (
+                StockStatus.BOUGHT,          # 이미 매수 완료
+                StockStatus.BUY_ORDERED,     # 매수 주문 접수 후 체결 대기
+                StockStatus.PARTIAL_BOUGHT   # 일부 체결된 상태
+            ):
                 return False
 
             # 2) 중복 매수 쿨다운

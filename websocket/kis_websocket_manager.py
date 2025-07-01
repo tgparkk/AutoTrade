@@ -7,6 +7,7 @@ import time
 from typing import Dict, List, Optional, Callable
 from utils.logger import setup_logger
 from utils.korean_time import now_kst
+import concurrent.futures  # ⬅️ 추가: TimeoutError 처리를 위해 concurrent.futures
 
 # 분리된 컴포넌트들
 from websocket.kis_websocket_connection import KISWebSocketConnection
@@ -380,7 +381,25 @@ class KISWebSocketManager:
                     self.unsubscribe_stock(stock_code),
                     self._event_loop
                 )
-                return future.result(timeout=10)
+                # 최대 3초만 대기 후 결과가 안 오면 백그라운드 진행으로 간주
+                return future.result(timeout=3)
+            except concurrent.futures.TimeoutError:
+                logger.warning(f"구독 해제 지연 ({stock_code}) – 백그라운드에서 완료 예정")
+
+                # 완료 후 성공/실패 여부를 로그로 남김
+                def _log_unsub_result(fut):
+                    try:
+                        result = fut.result()
+                        if result:
+                            logger.info(f"✅ 종목 구독 해제 완료(지연): {stock_code}")
+                        else:
+                            logger.error(f"❌ 종목 구독 해제 실패(지연): {stock_code}")
+                    except Exception as cb_e:
+                        logger.error(f"❌ 종목 구독 해제 예외(지연) {stock_code}: {cb_e}")
+
+                future.add_done_callback(_log_unsub_result)
+                return True  # 호출 측에는 성공으로 간주
+
             except Exception as e:
                 logger.error(f"동기 구독 해제 오류 ({stock_code}): {e}")
         else:

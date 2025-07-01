@@ -50,6 +50,10 @@ class RealTimeMonitor:
         # StockManager에 자신의 참조 설정 (체결통보 통계 업데이트용)
         self.stock_manager.set_realtime_monitor_ref(self)
         
+        # 🆕 StockManager에 TradeExecutor 참조 설정 (즉시 매도용)
+        if hasattr(self.stock_manager, 'set_trade_executor_ref'):
+            self.stock_manager.set_trade_executor_ref(trade_executor)
+        
         # StockManager에 OrderRecoveryManager 참조 설정
         self.stock_manager.set_order_recovery_manager(self.order_recovery_manager)
         

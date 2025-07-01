@@ -16,7 +16,7 @@
 
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 from datetime import datetime
 from models.stock import Stock, StockStatus, ReferenceData, RealtimeData
 from utils.korean_time import now_kst
@@ -82,6 +82,11 @@ class StockManager:
         
         # 🆕 스레드 안전한 플래그들 (threading.Event 사용)
         self._shutdown_event = threading.Event()
+        # TradeExecutor 참조 – RealTimeMonitor 에서 set_trade_executor_ref 로 주입
+        from typing import Optional, TYPE_CHECKING
+        if TYPE_CHECKING:
+            from trade.trade_executor import TradeExecutor
+        self._trade_executor: Optional["TradeExecutor"] = None
         
         # 🆕 메모리 가시성 보장을 위한 조건 변수
         self._data_updated = threading.Condition(self._realtime_lock)
@@ -1034,6 +1039,19 @@ class StockManager:
                 
                 realtime.update_timestamp()
                 
+                # 🆕 트레일링 스탑 즉시 매도 로직
+                if (self._trade_executor is not None and
+                    self.strategy_config.get('trailing_stop_enabled', True)):
+                    from trade.utils.trailing_stop import trailing_stop_check
+                    trail_ratio = self.strategy_config.get('trailing_stop_ratio', 1.0)
+                    trailing_stop_check(
+                        stock_manager=self,
+                        trade_executor=self._trade_executor,
+                        stock_code=stock_code,
+                        current_price=current_price,
+                        trail_ratio=trail_ratio,
+                    )
+                
                 # 디버그 로그 (큰 가격 변동 또는 특이 상황 감지)
                 if old_price > 0:
                     price_change = abs((current_price - old_price) / old_price)
@@ -1543,5 +1561,10 @@ class StockManager:
             return liquidity_tracker.get_score(stock_code)
         except Exception:
             return 0.0
+    
+    def set_trade_executor_ref(self, trade_executor):
+        """TradeExecutor 참조 설정 (즉시 매도 용도)"""
+        self._trade_executor = trade_executor
+        logger.info("✅ TradeExecutor 참조 설정 완료")
     
  

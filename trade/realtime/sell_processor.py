@@ -58,6 +58,13 @@ class SellProcessor:
     ) -> bool:
         """조건 분석 후 매도 주문 실행 및 result 수치 업데이트"""
         try:
+            # 🆕 트레일링 스탑 목표가 갱신
+            if self.performance_config.get('trailing_stop_enabled', True):
+                trail_ratio = self.performance_config.get('trailing_stop_ratio', 1.0)
+                current_price = realtime_data.get('current_price', 0)
+                if current_price > 0:
+                    stock.update_trailing_target(trail_ratio, current_price)
+
             sell_reason = self.analyze_sell_conditions(stock, realtime_data, market_phase)
             if not sell_reason:
                 return False

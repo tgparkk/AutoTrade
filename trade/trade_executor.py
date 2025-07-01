@@ -39,6 +39,8 @@ class TradeExecutor:
         # 설정 로드
         self.config_loader = get_trading_config_loader()
         self.risk_config = self.config_loader.load_risk_management_config()
+        # 🆕 전략 설정 로드 (트레일링 스탑 등)
+        self.strategy_config = self.config_loader.load_trading_strategy_config()
         
         # 거래 통계
         self.total_trades = 0
@@ -100,6 +102,17 @@ class TradeExecutor:
         start_time = now_kst().timestamp()
         
         try:
+            # 이미 매수 주문(접수/일부체결) 또는 매수 완료 상태라면 중복 주문 방지
+            if stock.status in (
+                StockStatus.BUY_ORDERED,
+                StockStatus.PARTIAL_BOUGHT,
+                StockStatus.BOUGHT,
+            ):
+                logger.warning(
+                    f"중복 매수 시도 차단: {stock.stock_code} 현재 상태 {stock.status.value}"
+                )
+                return False
+            
             # 비상 정지 체크
             if self.emergency_stop:
                 logger.warning("비상 정지 상태 - 매수 주문 차단")
@@ -216,6 +229,12 @@ class TradeExecutor:
             
             stock.stop_loss_price = price * (1 + stop_loss_rate)
             stock.target_price = price * (1 + take_profit_rate)
+            
+            # 🆕 트레일링 스탑 초기화
+            if self.strategy_config.get('trailing_stop_enabled', True):
+                trail_ratio = self.strategy_config.get('trailing_stop_ratio', 1.0)
+                stock.dynamic_peak_price = price
+                stock.dynamic_target_price = price * (1 - trail_ratio / 100)
             
             # 실행 시간 기록
             execution_time = now_kst().timestamp() - start_time
@@ -1004,7 +1023,7 @@ class TradeExecutor:
             return False
     
     # ---------------------------
-    # �� Equity / Drawdown 관리
+    #  Equity / Drawdown 관리
     # ---------------------------
     def _update_equity_and_drawdown(self):
         """누적 손익 곡선 및 최대 낙폭 갱신"""

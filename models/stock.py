@@ -304,6 +304,10 @@ class Stock:
     sell_price: Optional[float] = None      # 매도가
     sell_reason: Optional[str] = None       # 매도 사유
     
+    # ➕ 동적 익절(트레일링 스탑) 관련
+    dynamic_peak_price: float = 0.0         # 보유 중 최고가
+    dynamic_target_price: float = 0.0       # 동적 익절가(최고가 대비 trail 비율)
+    
     # 손익 정보
     unrealized_pnl: Optional[float] = None   # 미실현 손익
     unrealized_pnl_rate: Optional[float] = None  # 미실현 손익률
@@ -593,4 +597,28 @@ class Stock:
     
     def __repr__(self) -> str:
         """디버그용 문자열 표현"""
-        return self.__str__() 
+        return self.__str__()
+
+    # ------------------------------------------------------------
+    # 🆕 트레일링 스탑 유틸리티
+    # ------------------------------------------------------------
+    def update_trailing_target(self, trail_ratio: float, current_price: float) -> None:
+        """최고가·동적 익절가 업데이트
+        
+        Args:
+            trail_ratio: 최고가 대비 허용 하락폭(%)
+            current_price: 최신 가격
+        """
+        if current_price <= 0 or trail_ratio <= 0:
+            return
+
+        # 최초 초기화
+        if self.dynamic_peak_price == 0.0:
+            base_price = self.buy_price or current_price
+            self.dynamic_peak_price = base_price
+            self.dynamic_target_price = base_price * (1 - trail_ratio / 100)
+
+        # 최고가 갱신 시 동적 목표가 재계산
+        if current_price > self.dynamic_peak_price:
+            self.dynamic_peak_price = current_price
+            self.dynamic_target_price = current_price * (1 - trail_ratio / 100) 

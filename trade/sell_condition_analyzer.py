@@ -142,6 +142,19 @@ class SellConditionAnalyzer:
         if market_phase == 'closing':
             return "market_close"
         
+        # 상한가 직전(+29%) 도달 시 즉시 익절 매도
+        try:
+            limit_up_rate = strategy_config.get('limit_up_profit_rate', 29.0)
+            current_price = realtime_data.get('current_price', stock.close_price)
+            yesterday_close = getattr(stock.reference_data, 'yesterday_close', 0)
+
+            if yesterday_close > 0 and current_price > 0:
+                daily_change_rate = (current_price - yesterday_close) / yesterday_close * 100
+                if daily_change_rate >= limit_up_rate:
+                    return "limit_up_take_profit"
+        except Exception as e:
+            logger.debug(f"Limit-up sell check error {stock.stock_code}: {e}")
+        
         # 급락 감지
         emergency_loss_rate = strategy_config.get('emergency_stop_loss_rate', -5.0)
         emergency_volatility = strategy_config.get('emergency_volatility_threshold', 3.0)
@@ -180,6 +193,12 @@ class SellConditionAnalyzer:
                                      holding_minutes: float, market_phase: str,
                                      strategy_config: Dict) -> Optional[str]:
         """익절 조건 확인"""
+        # 🆕 트레일링 스탑 익절
+        if strategy_config.get('trailing_stop_enabled', True):
+            dyn_target = getattr(stock, 'dynamic_target_price', 0.0)
+            if dyn_target > 0 and current_price <= dyn_target and current_pnl_rate > 0:
+                return "trailing_take_profit"
+        
         # 기본 익절
         if stock.should_take_profit(current_price):
             return "take_profit"
