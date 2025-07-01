@@ -724,9 +724,13 @@ class MarketScanner:
                 total_score = data['score']
                 reasons = ', '.join(data['reasons'])
                 
-                # 기존 종목 제외 로직 개선
+                # 기존 종목 제외 로직 개선 (안전한 상태 조회)
                 if code in excluded_codes:
-                    if not (self.reinclude_sold and self.stock_manager.trading_status.get(code) == StockStatus.SOLD):
+                    if not self.reinclude_sold:
+                        continue
+                    # 매도 완료된 종목 재포함 검사 (안전한 접근)
+                    stock_obj = self.stock_manager.get_selected_stock(code)
+                    if not stock_obj or stock_obj.status != StockStatus.SOLD:
                         continue
 
                 # 🔧 거래대금 필터 완화 (완전 제거는 위험하므로 50% 완화)

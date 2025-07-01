@@ -29,17 +29,9 @@ def trailing_stop_check(
         trail_ratio: 최고가 대비 허용 하락폭 (%)
     """
     try:
-        # BOUGHT 상태에서만 동작
-        if stock_manager.trading_status.get(stock_code) != StockStatus.BOUGHT:
-            return
-
-        # Stock 객체 확보
-        stock_obj: Optional[Stock] = stock_manager._stock_cache.get(stock_code)
-        if stock_obj is None:
-            stock_obj = stock_manager._build_stock_object(stock_code)
-            if stock_obj:
-                stock_manager._stock_cache[stock_code] = stock_obj
-        if not stock_obj:
+        # BOUGHT 상태에서만 동작 (모듈화된 안전한 접근)
+        stock_obj: Optional[Stock] = stock_manager.get_selected_stock(stock_code)
+        if not stock_obj or stock_obj.status != StockStatus.BOUGHT:
             return
 
         # 최고가·익절가 갱신
@@ -49,8 +41,8 @@ def trailing_stop_check(
             logger.info(
                 f"🔔 [트레일링] {stock_code} {current_price:,} ≤ {dyn_target:,} – 즉시 매도"
             )
-            # 중복 방지
-            if stock_manager.trading_status.get(stock_code) == StockStatus.BOUGHT:
+            # 중복 방지 (안전한 상태 확인)
+            if stock_obj.status == StockStatus.BOUGHT:
                 trade_executor.execute_sell_order(
                     stock=stock_obj,
                     price=current_price,
