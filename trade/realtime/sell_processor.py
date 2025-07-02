@@ -36,6 +36,26 @@ class SellProcessor:
         self.performance_config: Dict[str, Any] = performance_config
         self.risk_config: Dict[str, Any] = risk_config
 
+    def _determine_sell_price(self, realtime_data: Dict[str, Any]) -> float:
+        """매도 주문가를 계산하여 반환한다.
+
+        1) 실시간 매도 1호가(ask_price)가 존재하면 우선 사용한다.
+        2) ask_price가 현재가(current_price)보다 낮으면 현재가로 보정하여
+           "현재가 이하"로 매도 주문이 나가는 것을 방지한다.
+        3) 두 값 모두 유효하지 않으면 0을 반환한다.
+        """
+        ask_price = realtime_data.get("ask_price") or 0
+        current_price = realtime_data.get("current_price") or 0
+
+        # 매도 1호가 우선 사용, 없으면 현재가
+        price = ask_price if ask_price > 0 else current_price
+
+        # 보호 로직: 주문가가 현재가보다 낮아지지 않도록 보정
+        if price < current_price:
+            price = current_price
+
+        return price
+
     # ------------------------------------------------------------
     # Wrapper
     # ------------------------------------------------------------
@@ -71,7 +91,7 @@ class SellProcessor:
 
             result_dict['signaled'] += 1
 
-            price = realtime_data.get('current_price') or 0
+            price = self._determine_sell_price(realtime_data)
             if price <= 0:
                 return False
 
