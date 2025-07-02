@@ -346,7 +346,7 @@ class TradeDatabase:
                     stock_data.get('buy_ratio')
                 ))
                 
-                record_id = cursor.lastrowid
+                record_id = cursor.lastrowid or 0
                 conn.commit()
                 
                 logger.debug(f"장중 스캔 결과 저장: {stock_data.get('stock_code')} (ID: {record_id})")
@@ -688,9 +688,9 @@ class TradeDatabase:
                 """, (trade_date,))
                 
                 pnl_result = cursor.fetchone()
-                total_pnl = pnl_result[0] or 0
-                wins = pnl_result[1] or 0
-                losses = pnl_result[2] or 0
+                total_pnl = float(pnl_result[0] or 0)
+                wins = int(pnl_result[1] or 0)
+                losses = int(pnl_result[2] or 0)
                 
                 # 승률 계산
                 total_trades = wins + losses
@@ -874,4 +874,118 @@ class TradeDatabase:
             return True
         except Exception as e:
             logger.error(f"metrics_daily 저장 실패: {e}")
+            return False
+
+    def save_daily_summary(self, trade_date: Optional[date] = None) -> bool:
+        """해당 일자의 요약 데이터를 daily_summaries 테이블에 저장(UPSERT)합니다.
+
+        Args:
+            trade_date: 요약할 거래 날짜. None 이면 오늘(now_kst().date())
+
+        Returns:
+            성공 여부
+        """
+        try:
+            if trade_date is None:
+                trade_date = now_kst().date()
+
+            with sqlite3.connect(self.db_path) as conn:
+                c = conn.cursor()
+
+                # 1) 스캔 건수
+                c.execute("SELECT COUNT(*) FROM pre_market_scans WHERE scan_date = ?", (trade_date,))
+                pre_market_scanned_count = c.fetchone()[0] or 0
+
+                c.execute("SELECT COUNT(*) FROM intraday_scans WHERE scan_date = ?", (trade_date,))
+                intraday_scanned_count = c.fetchone()[0] or 0
+
+                # 2) 주문 건수
+                c.execute("SELECT COUNT(*) FROM buy_orders WHERE order_date = ?", (trade_date,))
+                total_buy_orders = c.fetchone()[0] or 0
+
+                c.execute("SELECT COUNT(*) FROM sell_orders WHERE order_date = ?", (trade_date,))
+                total_sell_orders = c.fetchone()[0] or 0
+
+                c.execute("SELECT COUNT(*) FROM buy_orders WHERE order_date = ? AND order_status = 'executed'", (trade_date,))
+                executed_buy_orders = c.fetchone()[0] or 0
+
+                c.execute("SELECT COUNT(*) FROM sell_orders WHERE order_date = ? AND order_status = 'executed'", (trade_date,))
+                executed_sell_orders = c.fetchone()[0] or 0
+
+                # 3) 손익 및 승률
+                c.execute(
+                    """
+                    SELECT 
+                        COALESCE(SUM(profit_loss), 0) as total_pnl,
+                        COUNT(CASE WHEN profit_loss > 0 THEN 1 END) as wins,
+                        COUNT(CASE WHEN profit_loss < 0 THEN 1 END) as losses,
+                        AVG(holding_minutes) as avg_holding_minutes
+                    FROM sell_orders 
+                    WHERE order_date = ? AND order_status = 'executed'
+                    """,
+                    (trade_date,)
+                )
+                total_pnl, wins, losses, avg_holding_minutes = c.fetchone()
+                total_pnl = float(total_pnl or 0)
+                wins = int(wins or 0)
+                losses = int(losses or 0)
+                avg_holding_minutes = float(avg_holding_minutes or 0)
+                total_trades = wins + losses
+                win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+
+                # 4) 총 투자금 및 최대 동시 포지션 수
+                c.execute("SELECT COALESCE(SUM(total_amount), 0) FROM buy_orders WHERE order_date = ?", (trade_date,))
+                total_investment = c.fetchone()[0] or 0
+
+                # 최대 동시 포지션 수를 간단히 total_buy_orders 로 대체 (정교화 가능)
+                max_position_count = total_buy_orders
+
+                # UPSERT
+                c.execute(
+                    """
+                    INSERT INTO daily_summaries (
+                        trade_date, pre_market_scanned_count, intraday_scanned_count,
+                        total_buy_orders, total_sell_orders, executed_buy_orders,
+                        executed_sell_orders, total_profit_loss, win_count, loss_count,
+                        win_rate, total_investment, max_position_count, avg_holding_minutes,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(trade_date) DO UPDATE SET
+                        pre_market_scanned_count=excluded.pre_market_scanned_count,
+                        intraday_scanned_count=excluded.intraday_scanned_count,
+                        total_buy_orders=excluded.total_buy_orders,
+                        total_sell_orders=excluded.total_sell_orders,
+                        executed_buy_orders=excluded.executed_buy_orders,
+                        executed_sell_orders=excluded.executed_sell_orders,
+                        total_profit_loss=excluded.total_profit_loss,
+                        win_count=excluded.win_count,
+                        loss_count=excluded.loss_count,
+                        win_rate=excluded.win_rate,
+                        total_investment=excluded.total_investment,
+                        max_position_count=excluded.max_position_count,
+                        avg_holding_minutes=excluded.avg_holding_minutes,
+                        updated_at=CURRENT_TIMESTAMP
+                    """,
+                    (
+                        trade_date,
+                        pre_market_scanned_count,
+                        intraday_scanned_count,
+                        total_buy_orders,
+                        total_sell_orders,
+                        executed_buy_orders,
+                        executed_sell_orders,
+                        total_pnl,
+                        wins,
+                        losses,
+                        win_rate,
+                        total_investment,
+                        max_position_count,
+                        avg_holding_minutes,
+                    ),
+                )
+                conn.commit()
+            logger.info(f"daily_summaries 저장/갱신 완료: {trade_date}")
+            return True
+        except Exception as e:
+            logger.error(f"daily_summaries 저장 실패: {e}")
             return False 

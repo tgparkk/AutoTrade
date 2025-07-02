@@ -74,7 +74,8 @@ class PerformanceLogger:
                     'params': self.monitor.performance_config
                 }
                 database.save_daily_metrics(metrics)
-                logger.info("📈 metrics_daily 저장 완료")
+                database.save_daily_summary(now_kst().date())
+                logger.info("📈 metrics_daily / daily_summaries 저장 완료")
 
             logger.info("=" * 60)
         except Exception as e:
