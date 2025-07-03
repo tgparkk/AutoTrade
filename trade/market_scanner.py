@@ -56,9 +56,15 @@ class MarketScanner:
         self.performance_config = self.config_loader.load_performance_config()
         self.daytrading_config = self.config_loader.load_daytrading_config()
         
-        # 스크리닝 기준 (장전 스캔용)
+        # 스크리닝 기준 (장전 스캔용) - 데이트레이딩 최적화
         self.volume_increase_threshold = self.strategy_config.get('volume_increase_threshold', 2.0)
-        self.volume_min_threshold = self.strategy_config.get('volume_min_threshold', 100000)
+        self.volume_min_threshold = self.strategy_config.get('volume_min_threshold', 500000)  # 50만주로 강화
+        
+        # 🆕 데이트레이딩 활성도 필터
+        self.min_daily_volatility = self.strategy_config.get('min_daily_volatility', 1.0)
+        self.min_price_change_rate = self.strategy_config.get('min_price_change_rate_for_buy', 0.3)
+        self.min_volume_turnover_rate = self.strategy_config.get('min_volume_turnover_rate', 0.5)
+        self.min_contract_activity = self.strategy_config.get('min_contract_activity', 50)
         # 상위 종목 선정 개수 – 설정 파일(max_premarket_selected_stocks)과 동기화
         self.top_stocks_count = self.performance_config.get('max_premarket_selected_stocks', 15)
         
@@ -355,15 +361,29 @@ class MarketScanner:
                                  f"현재가:{current_price}, 전일종가:{yesterday_close}, 거래량:{volume}")
                     return None
                 
-                # 🔧 최소 거래량 조건 완화 (0주도 허용, 장외시간 대비)
-                if volume < 0:  # 음수만 제외
-                    logger.warning(f"비정상 거래량으로 종목 제외: {stock_code} 거래량:{volume}")
+                # 🔧 최소 거래량 조건 강화 (데이트레이딩 최적화)
+                if volume < self.volume_min_threshold:
+                    logger.debug(f"거래량 부족으로 종목 제외: {stock_code} 거래량:{volume:,} < {self.volume_min_threshold:,}")
                     return None
                 
                 # 🔥 정확한 price_change_rate 계산 (일봉 데이터 기반)
                 accurate_price_change_rate = 0.0
                 if yesterday_close > 0 and yesterday_close != current_price:
                     accurate_price_change_rate = (current_price - yesterday_close) / yesterday_close * 100
+                
+                # 🆕 최소 상승률 조건 (데이트레이딩 활성도 필터)
+                if accurate_price_change_rate < self.min_price_change_rate:
+                    logger.debug(f"상승률 부족으로 종목 제외: {stock_code} ({accurate_price_change_rate:.1f}% < {self.min_price_change_rate}%)")
+                    return None
+                
+                # 🆕 일중 변동성 조건 (고가/저가 기반)
+                high_price = float(row.get('stck_hgpr', current_price))
+                low_price = float(row.get('stck_lwpr', current_price))
+                if high_price > 0 and low_price > 0 and low_price != high_price:
+                    daily_volatility = (high_price - low_price) / low_price * 100
+                    if daily_volatility < self.min_daily_volatility:
+                        logger.debug(f"일중 변동성 부족으로 종목 제외: {stock_code} ({daily_volatility:.1f}% < {self.min_daily_volatility}%)")
+                        return None
                 
                 # 종목 기본 정보 구성 (일봉 데이터 활용)
                 basic_info = {

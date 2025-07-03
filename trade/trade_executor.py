@@ -230,8 +230,8 @@ class TradeExecutor:
             stock.stop_loss_price = price * (1 + stop_loss_rate)
             stock.target_price = price * (1 + take_profit_rate)
             
-            # 🆕 트레일링 스탑 초기화
-            if self.strategy_config.get('trailing_stop_enabled', True):
+            # 🆕 트레일링 스탑 초기화 (설정에 따라)
+            if self.strategy_config.get('trailing_stop_enabled', False):
                 trail_ratio = self.strategy_config.get('trailing_stop_ratio', 1.0)
                 stock.dynamic_peak_price = price
                 stock.dynamic_target_price = price * (1 - trail_ratio / 100)
@@ -294,29 +294,30 @@ class TradeExecutor:
         Returns:
             익절률 (양수)
         """
-        base_rate = self.risk_config.get('take_profit_rate', 0.015)
-        
-        # 현재 시간대에 따른 조정
+        base_rate = self.risk_config.get('take_profit_rate', 0.03)
+
+        trading_mode = str(self.strategy_config.get('trading_mode', 'day')).lower()
         current_hour = now_kst().hour
-        
-        if 9 <= current_hour <= 10:  # 장 초반
-            base_rate = base_rate * 1.3  # 3.9% 익절
-        elif 14 <= current_hour <= 15:  # 장 마감 전
-            base_rate = base_rate * 0.8  # 2.4% 익절
-        
-        # 🆕 시장 변동성에 따른 추가 조정
+
+        # 데이트레이딩 모드에서는 시간대 보정을 적용하지 않는다.
+        if trading_mode not in ('day', 'daytrade', 'day_trading'):
+            if 9 <= current_hour <= 10:  # 장 초반
+                base_rate *= 1.15
+            elif 14 <= current_hour <= 15:  # 장 마감 전
+                base_rate *= 0.8
+
+        # 🆕 시장 변동성에 따른 추가 조정 (모드는 무관하게 유지)
         try:
-            # 변동성이 높으면 더 빠른 익절
             market_volatility = self._get_market_volatility()
-            if market_volatility > 2.0:  # 2% 이상 변동성
-                base_rate = base_rate * 1.2  # 더 빠른 익절
+            if market_volatility > 2.0:
+                base_rate *= 1.15
                 logger.debug(f"고변동성 시장으로 익절률 조정: {base_rate:.3f}")
-            elif market_volatility < 0.5:  # 0.5% 미만 저변동성
-                base_rate = base_rate * 1.1  # 약간 더 기다림
+            elif market_volatility < 0.5:
+                base_rate *= 1.10
                 logger.debug(f"저변동성 시장으로 익절률 조정: {base_rate:.3f}")
         except Exception as e:
             logger.debug(f"시장 변동성 조회 실패, 기본값 사용: {e}")
-        
+
         return base_rate
     
     def _get_current_market_phase(self) -> str:

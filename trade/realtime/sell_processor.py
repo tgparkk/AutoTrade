@@ -39,20 +39,28 @@ class SellProcessor:
     def _determine_sell_price(self, realtime_data: Dict[str, Any]) -> float:
         """매도 주문가를 계산하여 반환한다.
 
-        1) 실시간 매도 1호가(ask_price)가 존재하면 우선 사용한다.
-        2) ask_price가 현재가(current_price)보다 낮으면 현재가로 보정하여
-           "현재가 이하"로 매도 주문이 나가는 것을 방지한다.
-        3) 두 값 모두 유효하지 않으면 0을 반환한다.
+        1) 매도 1호가(ask_price)와 현재가(current_price) 중 더 높은 값을 사용해
+           "헐값" 매도를 방지한다.
+        2) 두 값 모두 유효(>0)가 아닐 때는 0 을 반환하여 주문을 건너뛴다.
+        3) (옵션) 실시간 데이터가 너무 오래됐으면 0 반환 – data_max_age(sec) 설정.
         """
         ask_price = realtime_data.get("ask_price") or 0
         current_price = realtime_data.get("current_price") or 0
 
-        # 매도 1호가 우선 사용, 없으면 현재가
-        price = ask_price if ask_price > 0 else current_price
+        # 두 값 중 더 높은 값 선택
+        price = max(ask_price, current_price)
 
-        # 보호 로직: 주문가가 현재가보다 낮아지지 않도록 보정
-        if price < current_price:
-            price = current_price
+        # 유효 가격이 없으면 주문하지 않음
+        if price <= 0:
+            return 0
+
+        # 추가 안전장치: 데이터 신선도 확인 (기본 2초)
+        last_ts = realtime_data.get("last_updated") or realtime_data.get("timestamp")
+        if isinstance(last_ts, datetime):
+            max_age = self.performance_config.get("data_max_age", 2)
+            if (now_kst() - last_ts).total_seconds() > max_age:
+                # 데이터가 너무 오래됨 → 주문 보류
+                return 0
 
         return price
 
@@ -78,8 +86,8 @@ class SellProcessor:
     ) -> bool:
         """조건 분석 후 매도 주문 실행 및 result 수치 업데이트"""
         try:
-            # 🆕 트레일링 스탑 목표가 갱신
-            if self.performance_config.get('trailing_stop_enabled', True):
+            # 🆕 트레일링 스탑 목표가 갱신 (설정에 따라)
+            if self.performance_config.get('trailing_stop_enabled', False):
                 trail_ratio = self.performance_config.get('trailing_stop_ratio', 1.0)
                 current_price = realtime_data.get('current_price', 0)
                 if current_price > 0:

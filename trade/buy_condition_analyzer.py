@@ -163,9 +163,9 @@ class BuyConditionAnalyzer:
             has_volume_data = (volume_turnover_rate > 0)
             has_contract_data = (buy_contract_count > 0 or sell_contract_count > 0)
             
-            # 최소 2가지 이상의 실시간 데이터가 있어야 매수 허용
+            # 최소 1가지 이상의 실시간 데이터가 있어야 매수 허용 (완화)
             realtime_data_score = sum([has_orderbook_data, has_volume_data, has_contract_data])
-            min_required_data = strategy_config.get('min_realtime_data_types', 2)
+            min_required_data = strategy_config.get('min_realtime_data_types', 1)  # 2 → 1 완화
             
             if realtime_data_score < min_required_data:
                 logger.debug(f"실시간 데이터 부족으로 제외: {stock.stock_code} "
@@ -185,13 +185,19 @@ class BuyConditionAnalyzer:
                 logger.debug(f"급락 종목 제외: {stock.stock_code} ({price_change_rate:.1f}%)")
                 return False
             
+            # 🆕 최소 상승률 조건 (저활성 종목 제외)
+            min_price_change = strategy_config.get('min_price_change_rate_for_buy', 0.3)
+            if price_change_rate < min_price_change:
+                logger.debug(f"상승률 부족 제외: {stock.stock_code} ({price_change_rate:.1f}% < {min_price_change}%)")
+                return False
+            
             # 유동성 부족 체크 (호가 스프레드) - 실시간 데이터가 있을 때만
             if has_orderbook_data:
                 bid_price = realtime_data.get('bid_price', 0)
                 ask_price = realtime_data.get('ask_price', 0)
                 if bid_price > 0 and ask_price > 0:
                     spread_rate = (ask_price - bid_price) / bid_price * 100
-                    max_spread = strategy_config.get('max_spread_threshold', 5.0)  # 5%
+                    max_spread = strategy_config.get('max_spread_threshold', 8.0)  # 5.0% → 8.0% 완화
                     if spread_rate > max_spread:
                         logger.debug(f"유동성 부족 제외: {stock.stock_code} (스프레드: {spread_rate:.1f}%)")
                         return False
@@ -199,9 +205,29 @@ class BuyConditionAnalyzer:
             # 체결강도 최솟값 필터
             contract_strength = getattr(stock.realtime_data, 'contract_strength', 100.0)
             min_cs = strategy_config.get('min_contract_strength_for_buy',
-                                         performance_config.get('min_contract_strength_for_buy', 120.0))
+                                         performance_config.get('min_contract_strength_for_buy', 100.0))  # 120.0 → 100.0 완화
             if contract_strength < min_cs:
                 logger.debug(f"체결강도 부족 제외: {stock.stock_code} CS={contract_strength:.1f} < {min_cs}")
+                return False
+            
+            # 🆕 거래량 회전율 조건 (저활성 종목 제외)
+            min_volume_turnover = strategy_config.get('min_volume_turnover_rate', 0.5)
+            if volume_turnover_rate < min_volume_turnover:
+                logger.debug(f"거래량 회전율 부족 제외: {stock.stock_code} ({volume_turnover_rate:.2f}% < {min_volume_turnover}%)")
+                return False
+            
+            # 🆕 체결 활동도 조건 (저활성 종목 제외)
+            total_contract_activity = buy_contract_count + sell_contract_count
+            min_contract_activity = strategy_config.get('min_contract_activity', 50)
+            if total_contract_activity < min_contract_activity:
+                logger.debug(f"체결 활동도 부족 제외: {stock.stock_code} ({total_contract_activity}건 < {min_contract_activity}건)")
+                return False
+            
+            # 🆕 일중 변동성 조건 (저변동성 종목 제외)
+            volatility = getattr(stock.realtime_data, 'volatility', 0.0)
+            min_daily_volatility = strategy_config.get('min_daily_volatility', 1.0)
+            if volatility < min_daily_volatility:
+                logger.debug(f"일중 변동성 부족 제외: {stock.stock_code} ({volatility:.1f}% < {min_daily_volatility}%)")
                 return False
             
             return True
@@ -521,32 +547,32 @@ class BuyConditionAnalyzer:
     def _get_min_momentum_score(market_phase: str, performance_config: Dict) -> int:
         """시장 단계별 최소 모멘텀 점수 반환"""
         if market_phase == 'opening':
-            return performance_config.get('min_momentum_opening', 20)
+            return performance_config.get('min_momentum_opening', 12)  # 20 → 12 완화
         elif market_phase == 'pre_close':
-            return performance_config.get('min_momentum_preclose', 25)
+            return performance_config.get('min_momentum_preclose', 15)  # 25 → 15 완화
         else:
-            return performance_config.get('min_momentum_normal', 15)
+            return performance_config.get('min_momentum_normal', 10)   # 15 → 10 완화
     
     @staticmethod
     def _get_market_phase_thresholds(market_phase: str, strategy_config: Dict, performance_config: Dict) -> Dict:
         """시장 단계별 임계값 반환"""
-        buy_ratio_threshold = performance_config.get('buy_ratio_threshold', 60.0)
+        buy_ratio_threshold = performance_config.get('buy_ratio_threshold', 30.0)  # 60.0 → 30.0 완화
         
         if market_phase == 'opening':
             return {
-                'buy_ratio_min': buy_ratio_threshold * performance_config.get('opening_buy_ratio_multiplier', 1.1),
-                'min_pattern_score': performance_config.get('opening_pattern_score_threshold', 75.0),
-                'required_total_score': performance_config.get('buy_score_opening_threshold', 70)
+                'buy_ratio_min': buy_ratio_threshold * performance_config.get('opening_buy_ratio_multiplier', 1.05),  # 1.1 → 1.05 완화
+                'min_pattern_score': performance_config.get('opening_pattern_score_threshold', 65.0),  # 75.0 → 65.0 완화
+                'required_total_score': performance_config.get('buy_score_opening_threshold', 50)  # 70 → 50 완화
             }
         elif market_phase == 'pre_close':
             return {
-                'buy_ratio_min': buy_ratio_threshold * performance_config.get('preclose_buy_ratio_multiplier', 1.2),
-                'min_pattern_score': performance_config.get('opening_pattern_score_threshold', 75.0),
-                'required_total_score': performance_config.get('buy_score_preclose_threshold', 75)
+                'buy_ratio_min': buy_ratio_threshold * performance_config.get('preclose_buy_ratio_multiplier', 1.1),  # 1.2 → 1.1 완화
+                'min_pattern_score': performance_config.get('opening_pattern_score_threshold', 65.0),  # 75.0 → 65.0 완화
+                'required_total_score': performance_config.get('buy_score_preclose_threshold', 55)  # 75 → 55 완화
             }
         else:
             return {
                 'buy_ratio_min': buy_ratio_threshold,
-                'min_pattern_score': performance_config.get('normal_pattern_score_threshold', 70.0),
-                'required_total_score': performance_config.get('buy_score_normal_threshold', 60)
+                'min_pattern_score': performance_config.get('normal_pattern_score_threshold', 60.0),  # 70.0 → 60.0 완화
+                'required_total_score': performance_config.get('buy_score_normal_threshold', 45)  # 60 → 45 완화
             } 

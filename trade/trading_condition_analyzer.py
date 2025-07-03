@@ -201,12 +201,12 @@ class TradingConditionAnalyzer:
             
             if market_phase == 'opening':
                 # 장 초반 비율 적용
-                reduction_ratio = self.risk_config.get('opening_reduction_ratio', 0.5)
+                reduction_ratio = self.risk_config.get('opening_reduction_ratio', 0.8)  # 0.5 → 0.8 완화
                 investment_amount = base_amount * reduction_ratio
                 logger.debug(f"장 초반 투자금액 조정: {base_amount:,}원 × {reduction_ratio} = {investment_amount:,}원")
             elif market_phase == 'pre_close':
                 # 마감 전 비율 적용
-                reduction_ratio = self.risk_config.get('preclose_reduction_ratio', 0.3)
+                reduction_ratio = self.risk_config.get('preclose_reduction_ratio', 0.6)  # 0.3 → 0.6 완화
                 investment_amount = base_amount * reduction_ratio
                 logger.debug(f"마감 전 투자금액 조정: {base_amount:,}원 × {reduction_ratio} = {investment_amount:,}원")
             else:
@@ -219,7 +219,7 @@ class TradingConditionAnalyzer:
             max_positions = self.risk_config.get('max_positions', 5)
             
             if current_positions >= max_positions * 0.8:  # 80% 이상 차면 보수적
-                conservative_ratio = self.risk_config.get('conservative_ratio', 0.7)
+                conservative_ratio = self.risk_config.get('conservative_ratio', 0.8)  # 0.7 → 0.8 완화
                 investment_amount *= conservative_ratio
                 logger.debug(f"보수적 조정: × {conservative_ratio} = {investment_amount:,}원 (포지션: {current_positions}/{max_positions})")
             
@@ -380,10 +380,10 @@ class TradingConditionAnalyzer:
 
             if bid_qty > 0 and ask_qty > 0:
                 ratio_ba = bid_qty / ask_qty
-                min_ba = cfg.get('min_bid_ask_ratio_for_buy', 1.2)
-                max_ab = cfg.get('max_ask_bid_ratio_for_buy', 2.5)
+                min_ba = cfg.get('min_bid_ask_ratio_for_buy', 1.0)  # 1.2 → 1.0 완화
+                max_ab = cfg.get('max_ask_bid_ratio_for_buy', 3.0)  # 2.5 → 3.0 완화
 
-                # 매수호가 열세( <1.2 )
+                # 매수호가 열세( <1.0 )
                 if ratio_ba < min_ba:
                     logger.debug(f"매수호가 열세({ratio_ba*100:.1f}%)로 매수 제외: {stock.stock_code}")
                     return False
@@ -396,20 +396,20 @@ class TradingConditionAnalyzer:
 
             # 매수비율 / 체결강도
             buy_ratio = getattr(stock.realtime_data, 'buy_ratio', 50.0)
-            min_buy_ratio = cfg.get('min_buy_ratio_for_buy', 40.0)
+            min_buy_ratio = cfg.get('min_buy_ratio_for_buy', 30.0)  # 40.0 → 30.0 완화
             if buy_ratio < min_buy_ratio:
                 logger.debug(f"매수비율 낮음({buy_ratio:.1f}%)로 매수 제외: {stock.stock_code}")
                 return False
 
             strength = getattr(stock.realtime_data, 'contract_strength', 100.0)
-            min_strength = cfg.get('min_contract_strength_for_buy', 110.0)
+            min_strength = cfg.get('min_contract_strength_for_buy', 100.0)  # 110.0 → 100.0 완화
             if strength < min_strength:
                 logger.debug(f"체결강도 약함({strength:.1f})로 매수 제외: {stock.stock_code}")
                 return False
 
             # 일일 등락률 필터 – limit-up 근접 종목 제외
             price_change_rate = getattr(stock.realtime_data, 'price_change_rate', 0.0)
-            max_pct = cfg.get('max_price_change_rate_for_buy', 15.0)
+            max_pct = cfg.get('max_price_change_rate_for_buy', 20.0)  # 15.0 → 20.0 완화
             if price_change_rate >= max_pct:
                 logger.debug(f"등락률 높음({price_change_rate:.1f}%)로 매수 제외: {stock.stock_code}")
                 return False
@@ -420,7 +420,7 @@ class TradingConditionAnalyzer:
             except AttributeError:
                 liq_score = 0.0
 
-            min_liq = cfg.get('min_liquidity_score_for_buy', 3.0)
+            min_liq = cfg.get('min_liquidity_score_for_buy', 2.0)  # 3.0 → 2.0 완화
             if liq_score < min_liq:
                 logger.debug(f"유동성 낮음({liq_score:.1f})로 매수 제외: {stock.stock_code}")
                 return False

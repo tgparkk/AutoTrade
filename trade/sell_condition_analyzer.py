@@ -35,7 +35,10 @@ class SellConditionAnalyzer:
             매도 사유 또는 None
         """
         try:
+            # 🆕 가격 보정: 현재가 vs 매도1호가 중 더 높은 값 사용
+            ask_price = realtime_data.get('ask_price') or realtime_data.get('ask_price1') or 0
             current_price = realtime_data.get('current_price', stock.close_price)
+            current_price = max(current_price, ask_price)
             
             # 현재 손익 상황 계산
             current_pnl = 0
@@ -48,6 +51,10 @@ class SellConditionAnalyzer:
             holding_minutes = 0
             if stock.order_time:
                 holding_minutes = (now_kst() - stock.order_time).total_seconds() / 60
+            
+            # 🆕 익절 관련 디버그 로그 (3% 이상 수익 시)
+            if current_pnl_rate >= 2.0:
+                logger.info(f"🔍 익절 조건 체크: {stock.stock_code} 수익률={current_pnl_rate:.2f}% 보유시간={holding_minutes:.1f}분")
             
             # 고급 지표 추출
             contract_strength = getattr(stock.realtime_data, 'contract_strength', 100.0)
@@ -142,6 +149,11 @@ class SellConditionAnalyzer:
         if market_phase == 'closing':
             return "market_close"
         
+        # 🆕 최대 수익률 보호 (즉시 익절)
+        max_profit_protection_rate = strategy_config.get('max_profit_protection_rate', 2.5)
+        if current_pnl_rate >= max_profit_protection_rate:
+            return "immediate_profit_protection"
+        
         # 상한가 직전(+29%) 도달 시 즉시 익절 매도
         try:
             limit_up_rate = strategy_config.get('limit_up_profit_rate', 29.0)
@@ -193,8 +205,23 @@ class SellConditionAnalyzer:
                                      holding_minutes: float, market_phase: str,
                                      strategy_config: Dict) -> Optional[str]:
         """익절 조건 확인"""
-        # 🆕 트레일링 스탑 익절
-        if strategy_config.get('trailing_stop_enabled', True):
+        # 🆕 최대 수익률 보호 (우선 체크)
+        max_profit_protection_rate = strategy_config.get('max_profit_protection_rate', 2.5)
+        if current_pnl_rate >= max_profit_protection_rate:
+            return "max_profit_protection"
+        
+        # 🆕 시간 기반 익절 (빠른 수익 실현)
+        min_holding_for_profit = strategy_config.get('min_holding_for_profit_take', 1)
+        time_based_profit_threshold = strategy_config.get('time_based_profit_threshold', 2.0)
+        if holding_minutes >= min_holding_for_profit and current_pnl_rate >= time_based_profit_threshold:
+            return "time_based_profit_take"
+        
+        # 🆕 1분 이상 보유 시 1.5% 이상 수익 시 익절 (더 적극적)
+        if holding_minutes >= 1 and current_pnl_rate >= 1.5:
+            return "quick_profit_take"
+        
+        # 🆕 트레일링 스탑 익절 (설정에 따라)
+        if strategy_config.get('trailing_stop_enabled', False):
             dyn_target = getattr(stock, 'dynamic_target_price', 0.0)
             if dyn_target > 0 and current_price <= dyn_target and current_pnl_rate > 0:
                 return "trailing_take_profit"

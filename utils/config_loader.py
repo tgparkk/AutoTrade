@@ -108,6 +108,19 @@ class TradingConfigLoader:
             'test_mode': self.get_bool('test_mode', section, True),  # 테스트 모드 설정 추가
             # 상한가 직전 익절 매도 임계값 (% 기준)
             'limit_up_profit_rate': self.get_float('LIMIT_UP_PROFIT_RATE', section, 29.0),
+            
+            # 🔥 실시간 데이터 품질 요구사항
+            'min_realtime_data_types': self.get_int('min_realtime_data_types', section, 2),
+            'max_spread_threshold': self.get_float('max_spread_threshold', section, 5.0),
+            'require_orderbook_data': self.get_bool('require_orderbook_data', section, True),
+            'require_volume_data': self.get_bool('require_volume_data', section, True),
+            'require_contract_data': self.get_bool('require_contract_data', section, False),
+            
+            # 🆕 데이트레이딩 활성도 필터 (저활성 종목 제외)
+            'min_daily_volatility': self.get_float('min_daily_volatility', section, 1.0),
+            'min_price_change_rate_for_buy': self.get_float('min_price_change_rate_for_buy', section, 0.3),
+            'min_volume_turnover_rate': self.get_float('min_volume_turnover_rate', section, 0.5),
+            'min_contract_activity': self.get_int('min_contract_activity', section, 50),
         }
         
         logger.info("거래 전략 설정 로드 완료")
@@ -134,9 +147,9 @@ class TradingConfigLoader:
             'base_investment_amount': self.get_float('BASE_INVESTMENT_AMOUNT', section, 1000000),
             'position_size_ratio': self.get_float('POSITION_SIZE_RATIO', section, 0.1),
             'use_account_ratio': self.get_bool('USE_ACCOUNT_RATIO', section, False),
-            'opening_reduction_ratio': self.get_float('OPENING_REDUCTION_RATIO', section, 0.5),
-            'preclose_reduction_ratio': self.get_float('PRECLOSE_REDUCTION_RATIO', section, 0.3),
-            'conservative_ratio': self.get_float('CONSERVATIVE_RATIO', section, 0.7)
+            'opening_reduction_ratio': self.get_float('OPENING_REDUCTION_RATIO', section, 0.8),  # 0.5 → 0.8 완화
+            'preclose_reduction_ratio': self.get_float('PRECLOSE_REDUCTION_RATIO', section, 0.6),  # 0.3 → 0.6 완화
+            'conservative_ratio': self.get_float('CONSERVATIVE_RATIO', section, 0.8)  # 0.7 → 0.8 완화
         }
         
         logger.info("리스크 관리 설정 로드 완료")
@@ -283,17 +296,26 @@ class TradingConfigLoader:
             'high_volatility_threshold': self.get_float('high_volatility_threshold', section, 5.0),
             'price_decline_from_high_threshold': self.get_float('price_decline_from_high_threshold', section, 0.03),
             
+            # 🆕 트레일링 스탑 및 익절 보호 설정
+            'trailing_stop_enabled': self.get_bool('trailing_stop_enabled', section, False),
+            'trailing_stop_ratio': self.get_float('trailing_stop_ratio', section, 1.0),
+            'max_profit_protection_rate': self.get_float('max_profit_protection_rate', section, 2.5),
+            'time_based_profit_threshold': self.get_float('time_based_profit_threshold', section, 2.0),
+            'min_holding_for_profit_take': self.get_int('min_holding_for_profit_take', section, 1),
+            
             # 🆕 종목 관리 설정
             'max_premarket_selected_stocks': self.get_int('max_premarket_selected_stocks', section, 10),
             'max_intraday_selected_stocks': self.get_int('max_intraday_selected_stocks', section, 10),
             'max_total_observable_stocks': self.get_int('max_total_observable_stocks', section, 20),
             'intraday_scan_interval_minutes': self.get_int('intraday_scan_interval_minutes', section, 30),
-            # 🔍 intraday scan tuning (신규)
+            # 🔍 intraday scan tuning (신규) - 데이트레이딩 활성도 강화
             'intraday_rank_head_limit': self.get_int('intraday_rank_head_limit', section, 50),
-            'intraday_min_total_score': self.get_int('intraday_min_total_score', section, 18),
+            'intraday_min_total_score': self.get_int('intraday_min_total_score', section, 14),
             'intraday_min_trading_value': self.get_int('intraday_min_trading_value', section, 2000),
             'intraday_max_spread_percent': self.get_float('intraday_max_spread_percent', section, 2.0),
             'intraday_reinclude_sold': self.get_bool('intraday_reinclude_sold', section, True),
+            'intraday_min_volatility': self.get_float('intraday_min_volatility', section, 0.8),
+            'intraday_min_volume_spike': self.get_float('intraday_min_volume_spike', section, 1.3),
             
             # 🆕 웹소켓 연결 설정
             'websocket_max_connections': self.get_int('websocket_max_connections', section, 41),
@@ -307,25 +329,39 @@ class TradingConfigLoader:
             'high_volume_threshold': self.get_float('high_volume_threshold', section, 3.0),
             'high_volatility_position_ratio': self.get_float('high_volatility_position_ratio', section, 0.3),
 
-            # 🆕 데이트레이딩 특화 최소 모멘텀/점수 설정
-            'min_momentum_opening': self.get_int('min_momentum_opening', section, 12),
-            'min_momentum_preclose': self.get_int('min_momentum_preclose', section, 15),
-            'min_momentum_normal': self.get_int('min_momentum_normal', section, 8),
-
-            # 🆕 시장 단계별 총점 기준치
-            'buy_score_opening_threshold': self.get_int('buy_score_opening_threshold', section, 45),
-            'buy_score_preclose_threshold': self.get_int('buy_score_preclose_threshold', section, 50),
-            'buy_score_normal_threshold': self.get_int('buy_score_normal_threshold', section, 40),
-
-            # 🆕 시장 단계별 추가 배수 / 패턴 점수 기준
-            'opening_buy_ratio_multiplier': self.get_float('opening_buy_ratio_multiplier', section, 1.1),
-            'preclose_buy_ratio_multiplier': self.get_float('preclose_buy_ratio_multiplier', section, 1.2),
-            'opening_pattern_score_threshold': self.get_float('opening_pattern_score_threshold', section, 55.0),
-            'normal_pattern_score_threshold': self.get_float('normal_pattern_score_threshold', section, 50.0),
+            # 🆕 시장 단계별 추가 배수 (데이트레이딩 최적화)
+            'opening_buy_ratio_multiplier': self.get_float('opening_buy_ratio_multiplier', section, 1.05),  # 1.1 → 1.05 완화
+            'preclose_buy_ratio_multiplier': self.get_float('preclose_buy_ratio_multiplier', section, 1.1),  # 1.2 → 1.1 완화
 
             # 체결강도/쿨다운 신규
-            'min_contract_strength_for_buy': self.get_float('min_contract_strength_for_buy', section, 110.0),
+            'min_contract_strength_for_buy': self.get_float('min_contract_strength_for_buy', section, 100.0),  # 110.0 → 100.0 완화
             'min_holding_minutes_before_sell': self.get_int('min_holding_minutes_before_sell', section, 1),
+            
+            # 🔥 1차 필터 임계값 (데이트레이딩 최적화) - 추가됨
+            'min_bid_ask_ratio_for_buy': self.get_float('min_bid_ask_ratio_for_buy', section, 1.0),
+            'max_ask_bid_ratio_for_buy': self.get_float('max_ask_bid_ratio_for_buy', section, 3.0),
+            'min_buy_ratio_for_buy': self.get_float('min_buy_ratio_for_buy', section, 30.0),
+            'max_price_change_rate_for_buy': self.get_float('max_price_change_rate_for_buy', section, 20.0),
+            'min_liquidity_score_for_buy': self.get_float('min_liquidity_score_for_buy', section, 2.0),
+            
+            # 🎯 매수 점수 임계값 (데이트레이딩 최적화) - 업데이트
+            'buy_score_opening_threshold': self.get_int('buy_score_opening_threshold', section, 50),  # 45 → 50으로 수정
+            'buy_score_preclose_threshold': self.get_int('buy_score_preclose_threshold', section, 55),  # 50 → 55로 수정
+            'buy_score_normal_threshold': self.get_int('buy_score_normal_threshold', section, 45),  # 40 → 45로 수정
+            
+            # 🚀 모멘텀 점수 임계값 (데이트레이딩 최적화) - 업데이트
+            'min_momentum_opening': self.get_int('min_momentum_opening', section, 12),
+            'min_momentum_preclose': self.get_int('min_momentum_preclose', section, 15),
+            'min_momentum_normal': self.get_int('min_momentum_normal', section, 10),  # 8 → 10으로 수정
+            
+            # 🎨 패턴 점수 임계값 (데이트레이딩 최적화) - 추가됨
+            'normal_pattern_score_threshold': self.get_float('normal_pattern_score_threshold', section, 60.0),
+            'opening_pattern_score_threshold': self.get_float('opening_pattern_score_threshold', section, 65.0),
+            
+            # 💰 투자 금액 비율 (데이트레이딩 최적화) - 추가됨
+            'opening_reduction_ratio': self.get_float('opening_reduction_ratio', section, 0.8),
+            'preclose_reduction_ratio': self.get_float('preclose_reduction_ratio', section, 0.6),
+            'conservative_ratio': self.get_float('conservative_ratio', section, 0.8),
         }
         
         # 🆕 자동 파라미터 튜닝 결과 오버레이
@@ -340,7 +376,10 @@ class TradingConfigLoader:
             except Exception as e:
                 logger.warning(f"auto_params.json 로드 실패: {e}")
         
-        logger.info("성능 설정 로드 완료")
+        # 🆕 트레일링 스탑 설정 검증 로그
+        trailing_enabled = performance_config.get('trailing_stop_enabled', False)
+        max_profit_rate = performance_config.get('max_profit_protection_rate', 2.5)
+        logger.info(f"성능 설정 로드 완료 - 트레일링스탑: {trailing_enabled}, 최대수익률보호: {max_profit_rate}%")
         return performance_config
     
     def load_daytrading_config(self) -> Dict:
