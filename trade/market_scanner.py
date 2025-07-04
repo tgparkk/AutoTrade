@@ -740,6 +740,41 @@ class MarketScanner:
             # 6. 최종 후보 선별 및 점수 계산
             final_candidates = []
             
+            # 🔧 동적 거래대금 기준 계산 (현재 후보들의 분포 기반)
+            all_trading_values = []
+            for code, data in enhanced_candidates.items():
+                trading_value = float(data.get('trading_value', 0)) if isinstance(data, dict) else 0
+                if trading_value > 0:  # 0은 제외
+                    all_trading_values.append(trading_value)
+            
+            # 동적 거래대금 기준 설정
+            if all_trading_values:
+                import numpy as np
+                all_trading_values.sort()
+                
+                # 🔧 시장 상황에 따른 적응형 기준
+                num_candidates = len(all_trading_values)
+                if num_candidates >= 30:  # 충분한 후보가 있으면
+                    percentile_threshold = 20  # 하위 20% 제외
+                elif num_candidates >= 15:  # 중간 수준이면
+                    percentile_threshold = 15  # 하위 15% 제외
+                else:  # 후보가 적으면
+                    percentile_threshold = 10  # 하위 10%만 제외 (더 관대하게)
+                
+                percentile_value = np.percentile(all_trading_values, percentile_threshold)
+                min_absolute_value = 50_000_000  # 최소 5000만원 (기존 1억원에서 완화)
+                dynamic_min_trading_value = max(percentile_value, min_absolute_value)
+                
+                # 🔧 거래대금 분포 정보 로깅
+                median_value = np.percentile(all_trading_values, 50)
+                logger.debug(f"📊 동적 거래대금 기준: {dynamic_min_trading_value/1_000_000:,.1f}M "
+                           f"({percentile_threshold}th percentile: {percentile_value/1_000_000:,.1f}M, "
+                           f"median: {median_value/1_000_000:,.1f}M, 후보: {num_candidates}개)")
+            else:
+                # 기존 방식으로 fallback
+                dynamic_min_trading_value = self.min_trading_value * 0.2  # 더욱 관대하게 (50% → 20%)
+                logger.debug(f"📊 거래대금 정보 부족으로 기존 방식 사용: {dynamic_min_trading_value/1_000_000:,.1f}M")
+            
             for code, data in enhanced_candidates.items():
                 total_score = data['score']
                 reasons = ', '.join(data['reasons'])
@@ -753,11 +788,10 @@ class MarketScanner:
                     if not stock_obj or stock_obj.status != StockStatus.SOLD:
                         continue
 
-                # 🔧 거래대금 필터 완화 (완전 제거는 위험하므로 50% 완화)
+                # 🔧 동적 거래대금 필터 적용
                 trading_value = float(data.get('trading_value', 0)) if isinstance(data, dict) else 0
-                min_trading_value_relaxed = self.min_trading_value * 0.5  # 50% 완화
-                if 0 < trading_value < min_trading_value_relaxed:
-                    logger.debug(f"거래대금 부족으로 제외 {code}: {trading_value:,.0f}")
+                if 0 < trading_value < dynamic_min_trading_value:
+                    logger.debug(f"거래대금 부족으로 제외 {code}: {trading_value:,.0f} < {dynamic_min_trading_value:,.0f}")
                     continue
 
                 # 🔧 최소 점수 기준 대폭 완화 (20점 → 12점)

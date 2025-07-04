@@ -108,24 +108,50 @@ def calculate_comprehensive_score(scanner: "MarketScanner", stock_code: str) -> 
                 logger.debug(f"🚫 {stock_code} 거래정지 표시 – 제외")
                 return None
 
-            if pre_trading_value >= 500_000_000:
-                pre_val_score = 10
-            elif pre_trading_value >= 100_000_000:
-                pre_val_score = 5
-            elif pre_trading_value >= 50_000_000:
-                pre_val_score = 0
+            # 🔧 시간외 거래대금 필터링 로직 개선
+            min_pre_val = scanner.performance_config.get("preopen_min_trading_value", 50_000_000)
+            
+            # 시간외 거래대금이 매우 낮거나 0일 때는 전일 거래대금 기준으로 판단
+            if pre_trading_value < 10_000_000:  # 1000만원 미만이면 전일 기준 사용
+                avg_daily_trading_value = fundamentals.get("avg_daily_trading_value", 0)
+                # 전일 거래대금이 최소 기준의 50% 이상이면 통과
+                min_daily_threshold = min_pre_val * 2  # 전일은 더 관대하게 (2배)
+                if avg_daily_trading_value >= min_daily_threshold:
+                    logger.debug(
+                        f"📊 {stock_code} 시간외 거래 부족({pre_trading_value/1_000_000:,.1f}M)하지만 "
+                        f"전일 거래대금({avg_daily_trading_value/1_000_000:,.1f}M) 충분 – 통과"
+                    )
+                    # 전일 기준으로 점수 조정 (조금 낮게)
+                    if avg_daily_trading_value >= 1_000_000_000:  # 10억 이상
+                        pre_val_score = 3
+                    elif avg_daily_trading_value >= 500_000_000:  # 5억 이상
+                        pre_val_score = 1
+                    else:
+                        pre_val_score = 0
+                else:
+                    logger.debug(
+                        f"📊 {stock_code} 시간외 거래대금 {pre_trading_value/1_000_000:,.1f}M 및 "
+                        f"전일 거래대금 {avg_daily_trading_value/1_000_000:,.1f}M 모두 부족 – 제외"
+                    )
+                    return None
             else:
-                pre_val_score = -5
-
-            min_pre_val = scanner.performance_config.get(
-                "preopen_min_trading_value", 50_000_000
-            )
-            if pre_trading_value < min_pre_val:
-                logger.debug(
-                    f"📊 {stock_code} 시간외 거래대금 {pre_trading_value/1_000_000:,.1f}M <"
-                    f" min_pre_val({min_pre_val/1_000_000}M) – 제외"
-                )
-                return None
+                # 시간외 거래대금이 충분한 경우 기존 로직 사용
+                if pre_trading_value < min_pre_val:
+                    logger.debug(
+                        f"📊 {stock_code} 시간외 거래대금 {pre_trading_value/1_000_000:,.1f}M <"
+                        f" min_pre_val({min_pre_val/1_000_000}M) – 제외"
+                    )
+                    return None
+                
+                # 기존 점수 계산
+                if pre_trading_value >= 500_000_000:
+                    pre_val_score = 10
+                elif pre_trading_value >= 100_000_000:
+                    pre_val_score = 5
+                elif pre_trading_value >= 50_000_000:
+                    pre_val_score = 0
+                else:
+                    pre_val_score = -5
 
             try:
                 data_list = _convert_to_dict_list(ohlcv_data)
