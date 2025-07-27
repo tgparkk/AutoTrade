@@ -37,6 +37,14 @@ from trade.scanner.realtime_divergence import (
     get_stock_divergence_signal as compute_rt_divergence_signal,
 )
 
+# 고급 스캐너 모듈 (지연 로딩)
+try:
+    from trade.scanner.market_scanner_advanced import MarketScannerAdvanced
+    ADVANCED_SCANNER_AVAILABLE = True
+except ImportError:
+    MarketScannerAdvanced = None
+    ADVANCED_SCANNER_AVAILABLE = False
+
 class MarketScanner:
     """장시작전 시장 전체 스캔 및 종목 선정을 담당하는 클래스"""
     
@@ -78,6 +86,9 @@ class MarketScanner:
         
         # 🆕 데이터베이스는 싱글톤 패턴으로 필요시 생성
         logger.info("✅ MarketScanner 초기화 완료 (데이터베이스는 필요시 생성)")
+        
+        # 🆕 고급 장전 스캐너 초기화 (지연 로딩)
+        self._advanced_scanner_module = None
         
         logger.info("MarketScanner 초기화 완료")
     
@@ -173,6 +184,84 @@ class MarketScanner:
             logger.info(f"{i:2d}. {code}[{stock_name}] - 점수: {score:.1f}")
         
         return top_stocks
+    
+    def scan_market_pre_open_advanced(self) -> List[Dict[str, Any]]:
+        """고급 장전 스캐너를 사용한 시장 스캔 (모듈 위임)
+        
+        Returns:
+            상위 후보 종목들의 상세 분석 결과 리스트
+        """
+        advanced_module = self._get_advanced_scanner_module()
+        if not advanced_module:
+            logger.error("고급 스캐너 모듈을 사용할 수 없습니다")
+            return []
+        
+        return advanced_module.scan_market_pre_open_advanced()
+    
+    def _get_advanced_scanner_module(self):
+        """고급 스캐너 모듈 인스턴스 반환 (싱글톤 패턴)"""
+        if self._advanced_scanner_module is None:
+            if not ADVANCED_SCANNER_AVAILABLE:
+                logger.warning("고급 스캐너 모듈을 사용할 수 없습니다")
+                return None
+            
+            try:
+                self._advanced_scanner_module = MarketScannerAdvanced(
+                    stock_manager=self.stock_manager,
+                    websocket_manager=self.websocket_manager
+                )
+                
+                # 설정 주입
+                self._advanced_scanner_module.set_config(
+                    strategy_config=self.strategy_config,
+                    performance_config=self.performance_config
+                )
+                
+                logger.info("✅ 고급 스캐너 모듈 초기화 완료")
+                
+            except Exception as e:
+                logger.error(f"고급 스캐너 모듈 초기화 실패: {e}")
+                return None
+        
+        return self._advanced_scanner_module
+    
+    
+    def run_combined_pre_market_scan(self) -> Tuple[List[Tuple[str, float]], List[Dict[str, Any]]]:
+        """기존 + 고급 스캐너 결합 실행 (모듈 위임)
+        
+        Returns:
+            (기존 스캔 결과, 고급 스캐너 결과) 튜플
+        """
+        # 1. 기존 스캐너 실행
+        logger.info("1️⃣ 기존 장전 스캐너 실행")
+        traditional_results = self.scan_market_pre_open()
+        
+        # 2. 고급 스캐너 모듈로 위임
+        advanced_module = self._get_advanced_scanner_module()
+        if not advanced_module:
+            logger.warning("고급 스캐너 모듈 없음 - 기존 스캐너 결과만 반환")
+            return traditional_results, []
+        
+        return advanced_module.run_combined_pre_market_scan(traditional_results)
+    
+    def _select_top_stocks_from_advanced_results(self, scan_results: List[Dict[str, Any]]) -> bool:
+        """고급 스캐너 결과에서 상위 종목 선정 및 등록 (모듈 위임)"""
+        advanced_module = self._get_advanced_scanner_module()
+        if not advanced_module:
+            logger.error("고급 스캐너 모듈 없음")
+            return False
+        
+        return advanced_module.select_top_stocks_from_advanced_results(scan_results)
+    
+    def _select_stocks_from_combined_results(self, traditional_results: List[Tuple[str, float]], 
+                                           advanced_results: List[Dict[str, Any]]) -> bool:
+        """통합 스캔 결과에서 종목 선정 (모듈 위임)"""
+        advanced_module = self._get_advanced_scanner_module()
+        if not advanced_module:
+            logger.error("고급 스캐너 모듈 없음")
+            return False
+        
+        return advanced_module.select_stocks_from_combined_results(traditional_results, advanced_results)
     
 
     
@@ -528,8 +617,11 @@ class MarketScanner:
         
         return success_count > 0
     
-    def run_pre_market_scan(self) -> bool:
+    def run_pre_market_scan(self, use_advanced_scanner: bool = False) -> bool:
         """전체 장시작전 스캔 프로세스 실행
+        
+        Args:
+            use_advanced_scanner: 고급 스캐너 사용 여부
         
         Returns:
             스캔 성공 여부
@@ -540,15 +632,18 @@ class MarketScanner:
             # 1. 기존 선정 종목 초기화
             self.stock_manager.clear_all_stocks()
             
-            # 2. 시장 전체 스캔
-            scan_results = self.scan_market_pre_open()
-            
-            if not scan_results:
-                logger.warning("스캔 결과가 없습니다")
-                return False
-            
-            # 3. 상위 종목들 선정 및 등록
-            success = self.select_top_stocks(scan_results)
+            # 2. 스캐너 선택 및 실행
+            if use_advanced_scanner:
+                logger.info("🚀 고급 스캐너 모드 사용")
+                scan_results = self.scan_market_pre_open_advanced()
+                success = self._select_top_stocks_from_advanced_results(scan_results)
+            else:
+                logger.info("📊 기존 스캐너 모드 사용")
+                scan_results = self.scan_market_pre_open()
+                if not scan_results:
+                    logger.warning("스캔 결과가 없습니다")
+                    return False
+                success = self.select_top_stocks(scan_results)
             
             if success:
                 logger.info("=== 장시작전 시장 스캔 프로세스 완료 ===")
@@ -561,6 +656,37 @@ class MarketScanner:
             
         except Exception as e:
             logger.error(f"장시작전 스캔 프로세스 오류: {e}")
+            return False
+    
+    def run_pre_market_scan_combined(self) -> bool:
+        """기존 + 고급 스캐너 통합 실행
+        
+        Returns:
+            스캔 성공 여부
+        """
+        try:
+            logger.info("=== 통합 장전 스캔 프로세스 시작 ===")
+            
+            # 1. 기존 선정 종목 초기화
+            self.stock_manager.clear_all_stocks()
+            
+            # 2. 통합 스캔 실행
+            traditional_results, advanced_results = self.run_combined_pre_market_scan()
+            
+            # 3. 결과 통합 및 종목 선정
+            success = self._select_stocks_from_combined_results(traditional_results, advanced_results)
+            
+            if success:
+                logger.info("=== 통합 장전 스캔 프로세스 완료 ===")
+                summary = self.stock_manager.get_stock_summary()
+                logger.info(f"선정된 종목 수: {summary['total_selected']}")
+            else:
+                logger.error("통합 종목 선정 과정에서 오류 발생")
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"통합 장전 스캔 프로세스 오류: {e}")
             return False
     
     def __str__(self) -> str:
