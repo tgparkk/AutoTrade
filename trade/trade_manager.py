@@ -182,8 +182,15 @@ class TradeManager:
         logger.info("=== 장시작전 프로세스 시작 ===")
         
         try:
-            # 시장 스캔 및 종목 선정
-            success = self.market_scanner.run_pre_market_scan()
+            # 시장 스캔 및 종목 선정 (고급 스캐너 옵션 확인)
+            use_advanced_scanner = self.strategy_config.get('use_advanced_scanner', False)
+            use_combined_scanner = self.strategy_config.get('use_combined_scanner', False)
+            
+            if use_combined_scanner:
+                logger.info("🔀 통합 스캐너 모드 사용")
+                success = self.market_scanner.run_pre_market_scan_combined()
+            else:
+                success = self.market_scanner.run_pre_market_scan(use_advanced_scanner)
             
             if not success:
                 logger.error("장시작전 종목 선정 실패")
